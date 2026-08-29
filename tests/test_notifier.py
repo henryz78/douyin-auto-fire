@@ -10,6 +10,7 @@ import pytest
 from app.config import ConfigError, load_settings
 from app.models import TargetResult
 from app.notifier import (
+    TELEGRAM_MAX_MESSAGE_CHARS,
     _signed_webhook_url,
     build_dingtalk_markdown,
     build_telegram_message,
@@ -162,7 +163,7 @@ def test_split_telegram_message_preserves_content_and_limit() -> None:
 
 @pytest.mark.asyncio
 async def test_send_telegram_notification_sends_all_chunks(monkeypatch) -> None:
-    results = [TargetResult(target=f"好友{index}", status="failed", error="发送失败") for index in range(100)]
+    results = [TargetResult(target=f"好友{index}", status="failed", error="发送失败") for index in range(500)]
     sent: list[tuple[str, str, str]] = []
 
     def fake_post(bot_token: str, chat_id: str, text: str) -> None:
@@ -170,12 +171,15 @@ async def test_send_telegram_notification_sends_all_chunks(monkeypatch) -> None:
 
     monkeypatch.setattr("app.notifier._post_telegram_message", fake_post)
 
+    message = build_telegram_message("daily-streak", False, results)
+    assert len(message) > TELEGRAM_MAX_MESSAGE_CHARS
+
     await send_telegram_notification("123:BOT_TOKEN", "-100", "daily-streak", False, results)
 
     assert len(sent) > 1
     assert all(bot_token == "123:BOT_TOKEN" and chat_id == "-100" for bot_token, chat_id, _ in sent)
-    assert all(len(text) <= 3_900 for _, _, text in sent)
-    assert "好友99" in "\n".join(text for _, _, text in sent)
+    assert all(len(text) <= TELEGRAM_MAX_MESSAGE_CHARS for _, _, text in sent)
+    assert "好友499" in "".join(text for _, _, text in sent)
 
 
 def test_telegram_bot_token_and_chat_id_must_be_configured_together(monkeypatch) -> None:
