@@ -72,6 +72,9 @@ class Settings:
     dingtalk_webhook: str | None = None
     dingtalk_secret: str | None = None
     proxy: ProxySettings | None = None
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
+    account_id: str | None = None
 
 
 @dataclass(frozen=True)

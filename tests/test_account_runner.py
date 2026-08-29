@@ -56,10 +56,17 @@ def test_account_env_inherits_unset_keys(monkeypatch, tmp_path: Path) -> None:
 
 def test_account_env_applies_defaults(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.delenv("ARTIFACTS_DIR", raising=False)
+    monkeypatch.delenv("DOUYIN_ACCOUNT_ID", raising=False)
     env_file = _env_file(tmp_path, ".env.a", "DOUYIN_COOKIE=cookie-a\n")
 
-    with runner_module.account_env(env_file, defaults={"ARTIFACTS_DIR": "artifacts/account1"}):
+    with runner_module.account_env(
+        env_file,
+        defaults={"ARTIFACTS_DIR": "artifacts/account1", "DOUYIN_ACCOUNT_ID": "account1"},
+    ):
         assert os.environ["ARTIFACTS_DIR"] == "artifacts/account1"
+        assert os.environ["DOUYIN_ACCOUNT_ID"] == "account1"
+
+    assert "DOUYIN_ACCOUNT_ID" not in os.environ
 
 
 def test_account_env_explicit_value_beats_default(monkeypatch, tmp_path: Path) -> None:

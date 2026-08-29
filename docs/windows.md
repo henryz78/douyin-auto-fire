@@ -330,6 +330,15 @@ DINGTALK_SECRET=你的钉钉Secret
 
 两个参数必须同时填写。
 
+如果需要 Telegram 通知，可以在 `.env` 中加入：
+
+```env
+TELEGRAM_BOT_TOKEN=123456:你的BotToken
+TELEGRAM_CHAT_ID=-1001234567890
+```
+
+这两个参数必须同时填写。钉钉和 Telegram 可以同时启用，通知失败不会影响抖音任务结果。
+
 例如：
 
 ```env

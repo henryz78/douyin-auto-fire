@@ -17,6 +17,7 @@ from app.models import TargetResult
 
 MAX_RESULTS_PER_SECTION = 15
 MAX_MARKDOWN_BYTES = 18_000
+TELEGRAM_MAX_MESSAGE_CHARS = 3_900
 NOTIFY_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
 
 
@@ -35,6 +36,83 @@ async def send_dingtalk_notification(
         "at": {"isAtAll": False},
     }
     await asyncio.to_thread(_post_json, _signed_webhook_url(webhook, secret), payload)
+
+
+async def send_telegram_notification(
+    bot_token: str,
+    chat_id: str,
+    task_id: str,
+    dry_run: bool,
+    results: list[TargetResult],
+    account_id: str | None = None,
+    finished_at: datetime | None = None,
+) -> None:
+    message = build_telegram_message(task_id, dry_run, results, account_id, finished_at)
+    for chunk in split_telegram_message(message):
+        await asyncio.to_thread(_post_telegram_message, bot_token, chat_id, chunk)
+
+
+def build_telegram_message(
+    task_id: str,
+    dry_run: bool,
+    results: list[TargetResult],
+    account_id: str | None = None,
+    finished_at: datetime | None = None,
+) -> str:
+    successes = [result for result in results if result.status == "success"]
+    failures = [result for result in results if result.status == "failed"]
+    status = "✅ 抖音任务成功" if not failures else "❌ 抖音任务存在失败"
+    mode = "Dry Run（未发送消息）" if dry_run else "正式运行"
+    finished = (finished_at or datetime.now(timezone.utc)).astimezone(NOTIFY_TIMEZONE).strftime(
+        "%Y-%m-%d %H:%M:%S %z"
+    )
+    lines = [status, f"任务：{_telegram_text(task_id, limit=100)}"]
+    if account_id:
+        lines.append(f"账号：{_telegram_text(account_id, limit=100)}")
+    lines.extend(
+        [
+            f"模式：{mode}",
+            f"完成时间：{finished}",
+            f"结果：成功 {len(successes)} 人，失败 {len(failures)} 人",
+            "",
+            f"成功好友（{len(successes)}）：",
+        ]
+    )
+    if successes:
+        for result in successes:
+            detail = "验证通过" if dry_run else f"已发送 {result.sent} 条"
+            lines.append(f"- {_telegram_text(result.target, limit=100)}（{detail}）")
+    else:
+        lines.append("- 无")
+
+    lines.extend(["", f"失败好友（{len(failures)}）："])
+    if failures:
+        for result in failures:
+            error = _telegram_text(result.error or "未知错误", limit=300)
+            sent = f"（已发送 {result.sent} 条）" if result.sent else ""
+            lines.append(f"- {_telegram_text(result.target, limit=100)}{sent}：{error}")
+    else:
+        lines.append("- 无")
+    return "\n".join(lines)
+
+
+def split_telegram_message(text: str, max_chars: int = TELEGRAM_MAX_MESSAGE_CHARS) -> list[str]:
+    if max_chars <= 0:
+        raise ValueError("max_chars 必须大于 0")
+    if not text:
+        return [""]
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > max_chars:
+        cut = remaining.rfind("\n", 0, max_chars)
+        if cut <= 0:
+            cut = max_chars
+        else:
+            cut += 1
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:]
+    chunks.append(remaining)
+    return chunks
 
 
 def build_dingtalk_markdown(
@@ -122,6 +200,31 @@ def _post_json(url: str, payload: dict) -> None:
         raise RuntimeError(f"钉钉机器人返回错误: {result.get('errmsg', body)}")
 
 
+def _post_telegram_message(bot_token: str, chat_id: str, text: str) -> None:
+    request = Request(
+        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+        data=json.dumps(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "disable_web_page_preview": True,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            body = response.read().decode("utf-8")
+        result = json.loads(body)
+    except Exception:
+        # Bot Token 位于请求 URL 中，绝不把底层网络异常原文向上透传。
+        raise RuntimeError("Telegram Bot API 请求失败") from None
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise RuntimeError("Telegram Bot API 返回错误")
+
+
 def _github_run_url() -> str | None:
     server = os.getenv("GITHUB_SERVER_URL")
     repository = os.getenv("GITHUB_REPOSITORY")
@@ -137,6 +240,27 @@ def _markdown_text(value: str, limit: int | None = None) -> str:
         text = f"{text[:limit - 3]}..."
     for character in ("\\", "`", "*", "_", "[", "]", "#", ">", "|"):
         text = text.replace(character, f"\\{character}")
+    return text
+
+
+def _telegram_text(value: str, limit: int | None = None) -> str:
+    text = " ".join(str(value).splitlines()).strip()
+    for name in (
+        "DOUYIN_COOKIE",
+        "DOUYIN_STORAGE_STATE",
+        "DOUYIN_PROXY_SERVER",
+        "DOUYIN_PROXY_USERNAME",
+        "DOUYIN_PROXY_PASSWORD",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_CHAT_ID",
+        "DINGTALK_WEBHOOK",
+        "DINGTALK_SECRET",
+    ):
+        secret = os.getenv(name)
+        if secret:
+            text = text.replace(secret, "[已隐藏]")
+    if limit is not None and len(text) > limit:
+        text = f"{text[: max(0, limit - 3)]}..."
     return text
 
 

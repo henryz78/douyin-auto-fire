@@ -30,6 +30,8 @@ jobs:
       DOUYIN_PROXY_PASSWORD: ${{ secrets.DOUYIN_PROXY_PASSWORD }}
       DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
       DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       HEADLESS: "true"
     steps:
       - uses: actions/checkout@v4

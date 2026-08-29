@@ -17,7 +17,13 @@ from app.main import LOGGER, _configure_logging, _parse_cli_args, run
 
 # 单账号模式的旧环境变量。多账号模式下由各账号的 env 文件提供，
 # 启动时先清掉进程环境中的旧值，避免残留值被所有账号继承。
-_LEGACY_ENV_KEYS = ("DOUYIN_COOKIE", "DOUYIN_STORAGE_STATE", "TASK_CONFIG", "ARTIFACTS_DIR")
+_LEGACY_ENV_KEYS = (
+    "DOUYIN_COOKIE",
+    "DOUYIN_STORAGE_STATE",
+    "DOUYIN_ACCOUNT_ID",
+    "TASK_CONFIG",
+    "ARTIFACTS_DIR",
+)
 
 
 def run_all_accounts() -> int:
@@ -47,7 +53,13 @@ def run_all_accounts() -> int:
         _configure_logging(Path("artifacts") / account.id, label=account.id, reset=True)
         LOGGER.info("开始执行任务")
         try:
-            with account_env(account.env_file, defaults={"ARTIFACTS_DIR": f"artifacts/{account.id}"}):
+            with account_env(
+                account.env_file,
+                defaults={
+                    "ARTIFACTS_DIR": f"artifacts/{account.id}",
+                    "DOUYIN_ACCOUNT_ID": account.id,
+                },
+            ):
                 settings = load_settings(None)
                 _configure_logging(settings.artifacts_dir, label=account.id, reset=True)
                 with run_lock(settings.artifacts_dir / "run.lock"):

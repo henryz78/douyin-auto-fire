@@ -24,6 +24,10 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
     dingtalk_secret = _optional_env("DINGTALK_SECRET")
     if bool(dingtalk_webhook) != bool(dingtalk_secret):
         raise ConfigError("DINGTALK_WEBHOOK 和 DINGTALK_SECRET 必须同时配置")
+    telegram_bot_token = _optional_env("TELEGRAM_BOT_TOKEN")
+    telegram_chat_id = _optional_env("TELEGRAM_CHAT_ID")
+    if bool(telegram_bot_token) != bool(telegram_chat_id):
+        raise ConfigError("TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID 必须同时配置")
     proxy = load_proxy_settings()
     return Settings(
         task_config_path=task_path,
@@ -36,6 +40,9 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         dingtalk_webhook=dingtalk_webhook,
         dingtalk_secret=dingtalk_secret,
         proxy=proxy,
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
+        account_id=_optional_env("DOUYIN_ACCOUNT_ID"),
     )
 
 
