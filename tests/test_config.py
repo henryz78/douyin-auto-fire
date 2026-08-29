@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from app.config import ConfigError, load_task
+from app.config import ConfigError, load_proxy_settings, load_task
 from app.models import Settings
 
 
@@ -25,6 +25,79 @@ def write_config(tmp_path: Path, payload: dict) -> Path:
     path = config_dir / "tasks.json"
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+def _clear_proxy_env(monkeypatch) -> None:
+    for name in ("DOUYIN_PROXY_SERVER", "DOUYIN_PROXY_USERNAME", "DOUYIN_PROXY_PASSWORD"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_proxy_is_disabled_when_server_is_missing(monkeypatch) -> None:
+    _clear_proxy_env(monkeypatch)
+
+    assert load_proxy_settings() is None
+
+
+def test_loads_authenticated_http_proxy(monkeypatch) -> None:
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("DOUYIN_PROXY_SERVER", "http://proxy.example.com:3128")
+    monkeypatch.setenv("DOUYIN_PROXY_USERNAME", "proxy-user")
+    monkeypatch.setenv("DOUYIN_PROXY_PASSWORD", "proxy-password")
+
+    proxy = load_proxy_settings()
+
+    assert proxy is not None
+    assert proxy.as_playwright() == {
+        "server": "http://proxy.example.com:3128",
+        "username": "proxy-user",
+        "password": "proxy-password",
+    }
+
+
+def test_loads_unauthenticated_socks5_proxy(monkeypatch) -> None:
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("DOUYIN_PROXY_SERVER", "socks5://proxy.example.com:1080")
+
+    proxy = load_proxy_settings()
+
+    assert proxy is not None
+    assert proxy.as_playwright() == {"server": "socks5://proxy.example.com:1080"}
+
+
+def test_rejects_authenticated_socks5_proxy(monkeypatch) -> None:
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("DOUYIN_PROXY_SERVER", "socks5://proxy.example.com:1080")
+    monkeypatch.setenv("DOUYIN_PROXY_USERNAME", "proxy-user")
+    monkeypatch.setenv("DOUYIN_PROXY_PASSWORD", "proxy-password")
+
+    with pytest.raises(ConfigError, match="不支持带用户名/密码认证的 SOCKS5"):
+        load_proxy_settings()
+
+
+def test_rejects_partial_proxy_credentials(monkeypatch) -> None:
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("DOUYIN_PROXY_SERVER", "http://proxy.example.com:3128")
+    monkeypatch.setenv("DOUYIN_PROXY_USERNAME", "proxy-user")
+
+    with pytest.raises(ConfigError, match="必须同时配置"):
+        load_proxy_settings()
+
+
+def test_rejects_proxy_credentials_without_server(monkeypatch) -> None:
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("DOUYIN_PROXY_USERNAME", "proxy-user")
+    monkeypatch.setenv("DOUYIN_PROXY_PASSWORD", "proxy-password")
+
+    with pytest.raises(ConfigError, match="必须同时配置 DOUYIN_PROXY_SERVER"):
+        load_proxy_settings()
+
+
+def test_rejects_credentials_embedded_in_proxy_url(monkeypatch) -> None:
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("DOUYIN_PROXY_SERVER", "http://user:password@proxy.example.com:3128")
+
+    with pytest.raises(ConfigError, match="请分别使用"):
+        load_proxy_settings()
 
 
 def test_loads_multiple_targets_and_text(tmp_path: Path) -> None:

@@ -80,6 +80,9 @@ async def open_douyin(settings: Settings) -> AsyncIterator[BrowserSession]:
         launch_args = {"headless": settings.headless}
         if settings.browser_path:
             launch_args["executable_path"] = settings.browser_path
+        if settings.proxy:
+            launch_args["proxy"] = settings.proxy.as_playwright()
+            LOGGER.info("已启用固定代理")
         browser = await playwright.chromium.launch(**launch_args)
 
         context_args = {"viewport": {"width": 1440, "height": 1000}, "locale": "zh-CN"}

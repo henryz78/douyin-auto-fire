@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,10 +11,80 @@ from app.browser import (
     _collect_safe_diagnostic,
     _normalize_cookies,
     _safe_url,
+    open_douyin,
     open_private_messages,
 )
 from app.config import ConfigError
+from app.models import ProxySettings, Settings
 from app.selectors import DOUYIN_CHAT_URL, LOGIN_REQUIRED_MARKERS, RISK_MARKERS
+
+
+def _browser_settings(proxy: ProxySettings | None = None) -> Settings:
+    return Settings(
+        task_config_path=Path("config.json"),
+        storage_state=None,
+        cookie=None,
+        headless=True,
+        browser_path=None,
+        artifacts_dir=Path("artifacts"),
+        trace=False,
+        proxy=proxy,
+    )
+
+
+def _mock_browser_runtime():
+    page = MagicMock()
+    context = MagicMock()
+    context.new_page = AsyncMock(return_value=page)
+    context.close = AsyncMock()
+    browser = MagicMock()
+    browser.new_context = AsyncMock(return_value=context)
+    browser.close = AsyncMock()
+    playwright = MagicMock()
+    playwright.chromium.launch = AsyncMock(return_value=browser)
+    playwright.stop = AsyncMock()
+    manager = MagicMock()
+    manager.start = AsyncMock(return_value=playwright)
+    return manager, playwright
+
+
+@pytest.mark.asyncio
+async def test_launches_chromium_without_proxy_when_not_configured() -> None:
+    manager, playwright = _mock_browser_runtime()
+
+    with patch("app.browser.async_playwright", return_value=manager):
+        async with open_douyin(_browser_settings()):
+            pass
+
+    playwright.chromium.launch.assert_awaited_once_with(headless=True)
+
+
+@pytest.mark.asyncio
+async def test_launches_chromium_with_authenticated_http_proxy(caplog) -> None:
+    manager, playwright = _mock_browser_runtime()
+    proxy = ProxySettings(
+        server="http://proxy.example.com:3128",
+        username="proxy-user",
+        password="proxy-password",
+    )
+
+    with patch("app.browser.async_playwright", return_value=manager):
+        with caplog.at_level(logging.INFO, logger="douyin_sender"):
+            async with open_douyin(_browser_settings(proxy)):
+                pass
+
+    playwright.chromium.launch.assert_awaited_once_with(
+        headless=True,
+        proxy={
+            "server": "http://proxy.example.com:3128",
+            "username": "proxy-user",
+            "password": "proxy-password",
+        },
+    )
+    assert "已启用固定代理" in caplog.text
+    assert "proxy.example.com" not in caplog.text
+    assert "proxy-user" not in caplog.text
+    assert "proxy-password" not in caplog.text
 
 
 @pytest.mark.asyncio

@@ -264,6 +264,16 @@ notepad .env
 HEADLESS=true
 ```
 
+如需固定出口代理，可在 `.env` 中继续加入：
+
+```env
+DOUYIN_PROXY_SERVER=http://proxy.example.com:3128
+DOUYIN_PROXY_USERNAME=proxy-user
+DOUYIN_PROXY_PASSWORD=proxy-password
+```
+
+HTTP 支持可选用户名和密码，并可通过 CONNECT 访问 HTTPS 页面；SOCKS5 仅支持无认证。未配置 `DOUYIN_PROXY_SERVER` 时仍然使用原有直连逻辑。
+
 保存以后再次运行：
 
 ```powershell

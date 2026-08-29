@@ -9,6 +9,21 @@ MessageType = Literal["text", "image", "douyin_sticker", "random"]
 
 
 @dataclass(frozen=True)
+class ProxySettings:
+    server: str
+    username: str | None = None
+    password: str | None = None
+
+    def as_playwright(self) -> dict[str, str]:
+        proxy = {"server": self.server}
+        if self.username is not None:
+            proxy["username"] = self.username
+        if self.password is not None:
+            proxy["password"] = self.password
+        return proxy
+
+
+@dataclass(frozen=True)
 class Message:
     type: MessageType
     content: str | None = None
@@ -56,6 +71,7 @@ class Settings:
     trace: bool
     dingtalk_webhook: str | None = None
     dingtalk_secret: str | None = None
+    proxy: ProxySettings | None = None
 
 
 @dataclass(frozen=True)

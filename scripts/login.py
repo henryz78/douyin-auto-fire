@@ -4,6 +4,7 @@ import asyncio
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -11,12 +12,19 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from playwright.async_api import async_playwright
 
+from app.config import load_proxy_settings
 
 DOUYIN_URL = "https://www.douyin.com/"
 
+
 async def login() -> None:
+    load_dotenv()
+    proxy = load_proxy_settings()
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=False)
+        launch_args = {"headless": False}
+        if proxy:
+            launch_args["proxy"] = proxy.as_playwright()
+        browser = await playwright.chromium.launch(**launch_args)
         context = await browser.new_context(locale="zh-CN")
         page = await context.new_page()
         await page.goto(DOUYIN_URL, wait_until="domcontentloaded")

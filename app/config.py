@@ -4,10 +4,11 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
-from app.models import Message, Settings, Sticker, Target, TaskConfig
+from app.models import Message, ProxySettings, Settings, Sticker, Target, TaskConfig
 
 
 class ConfigError(ValueError):
@@ -23,6 +24,7 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
     dingtalk_secret = _optional_env("DINGTALK_SECRET")
     if bool(dingtalk_webhook) != bool(dingtalk_secret):
         raise ConfigError("DINGTALK_WEBHOOK 和 DINGTALK_SECRET 必须同时配置")
+    proxy = load_proxy_settings()
     return Settings(
         task_config_path=task_path,
         storage_state=_optional_env("DOUYIN_STORAGE_STATE") or (str(default_state) if default_state.is_file() else None),
@@ -33,7 +35,45 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         trace=_parse_bool(os.getenv("TRACE", "true"), "TRACE"),
         dingtalk_webhook=dingtalk_webhook,
         dingtalk_secret=dingtalk_secret,
+        proxy=proxy,
     )
+
+
+def load_proxy_settings() -> ProxySettings | None:
+    server = _optional_env("DOUYIN_PROXY_SERVER")
+    username = _optional_env("DOUYIN_PROXY_USERNAME")
+    password = _optional_env("DOUYIN_PROXY_PASSWORD")
+    if not server:
+        if username or password:
+            raise ConfigError("配置代理用户名或密码时必须同时配置 DOUYIN_PROXY_SERVER")
+        return None
+    if bool(username) != bool(password):
+        raise ConfigError("DOUYIN_PROXY_USERNAME 和 DOUYIN_PROXY_PASSWORD 必须同时配置")
+    scheme = _validate_proxy_server(server)
+    if scheme == "socks5" and username:
+        raise ConfigError("Playwright Chromium 不支持带用户名/密码认证的 SOCKS5 代理；请改用 HTTP 代理或无认证 SOCKS5")
+    return ProxySettings(server=server, username=username, password=password)
+
+
+def _validate_proxy_server(server: str) -> str:
+    candidate = server if "://" in server else f"http://{server}"
+    try:
+        parsed = urlsplit(candidate)
+        port = parsed.port
+    except ValueError as exc:
+        raise ConfigError("DOUYIN_PROXY_SERVER 不是有效的代理地址") from exc
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "socks5"}:
+        raise ConfigError("DOUYIN_PROXY_SERVER 仅支持 HTTP 或 SOCKS5 代理")
+    if not parsed.hostname:
+        raise ConfigError("DOUYIN_PROXY_SERVER 缺少有效主机名")
+    if parsed.username is not None or parsed.password is not None:
+        raise ConfigError("代理用户名和密码请分别使用 DOUYIN_PROXY_USERNAME 与 DOUYIN_PROXY_PASSWORD 配置")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ConfigError("DOUYIN_PROXY_SERVER 只能包含协议、主机名和端口")
+    if port is not None and not 1 <= port <= 65535:
+        raise ConfigError("DOUYIN_PROXY_SERVER 端口必须在 1 到 65535 之间")
+    return scheme
 
 
 def load_task(settings: Settings) -> TaskConfig:

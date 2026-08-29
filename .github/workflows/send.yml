@@ -25,6 +25,9 @@ jobs:
     env:
       DOUYIN_COOKIE: ${{ secrets.DOUYIN_COOKIE }}
       DOUYIN_CONFIG: ${{ secrets.DOUYIN_CONFIG }}
+      DOUYIN_PROXY_SERVER: ${{ secrets.DOUYIN_PROXY_SERVER }}
+      DOUYIN_PROXY_USERNAME: ${{ secrets.DOUYIN_PROXY_USERNAME }}
+      DOUYIN_PROXY_PASSWORD: ${{ secrets.DOUYIN_PROXY_PASSWORD }}
       DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
       DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
       HEADLESS: "true"

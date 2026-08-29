@@ -188,6 +188,48 @@ DOUYIN_CONFIG
 
 GitHub 保存 Secret 后不会再次显示具体内容，这是正常现象。
 
+### 5.3 配置固定出口代理（可选）
+
+GitHub 托管 Runner 的公网出口 IP 会变化。如果希望每次任务都从同一个公网 IP 访问抖音，需要购买或准备一个提供**静态出口 IP**的代理，并将代理信息保存为 GitHub Secrets。
+
+支持范围：
+
+| 代理类型 | 无认证 | 用户名/密码认证 |
+| --- | --- | --- |
+| HTTP（可通过 CONNECT 访问 HTTPS 页面） | ✅ | ✅ |
+| SOCKS5 | ✅ | ❌ Playwright Chromium 不支持 |
+
+推荐使用 HTTP 固定代理。在仓库的 Actions Secrets 中添加：
+
+| Secret | 内容 | 必须 |
+| --- | --- | --- |
+| `DOUYIN_PROXY_SERVER` | 代理地址，例如 `http://proxy.example.com:3128` | 使用代理时必须 |
+| `DOUYIN_PROXY_USERNAME` | 代理用户名 | 认证代理必须 |
+| `DOUYIN_PROXY_PASSWORD` | 代理密码 | 认证代理必须 |
+
+HTTP 认证代理示例：
+
+```text
+DOUYIN_PROXY_SERVER=http://proxy.example.com:3128
+DOUYIN_PROXY_USERNAME=proxy-user
+DOUYIN_PROXY_PASSWORD=proxy-password
+```
+
+无认证 SOCKS5 示例：
+
+```text
+DOUYIN_PROXY_SERVER=socks5://proxy.example.com:1080
+```
+
+注意：
+
+- 用户名和密码必须同时配置；
+- 不要把用户名或密码写进 `DOUYIN_PROXY_SERVER`，应使用独立 Secret；
+- 带认证的 SOCKS5 会在浏览器启动前直接报错，请改用代理服务商提供的 HTTP 接入地址；
+- 配置代理后，如果代理不可用或认证失败，任务会失败，不会回退到 GitHub Runner 直连；
+- 项目只能保证浏览器使用指定代理，出口 IP 是否长期固定由代理服务商保证；
+- 未配置 `DOUYIN_PROXY_SERVER` 时，程序保持原有直连逻辑。
+
 ---
 
 ## 6. 第一次运行：Dry Run
