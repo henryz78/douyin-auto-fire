@@ -108,4 +108,8 @@ tzdata>=2025.2
 
 ## License
 
-本项目采用 [MIT License](LICENSE)。
+本项目采用 [PolyForm Noncommercial License 1.0.0](LICENSE)。
+
+允许个人学习、研究、修改和非商业用途使用本项目；未经授权，不得将本项目或其衍生版本用于商业用途、收费服务、付费部署、倒卖或其他营利性场景。
+
+如需商业授权，请联系项目维护者。
