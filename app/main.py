@@ -10,6 +10,7 @@ import hashlib
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from app.browser import AuthenticationError, RiskControlError, SearchBoxNotReadyError, open_douyin, open_private_messages, save_trace, verify_login
 from app.config import ConfigError, load_settings, load_task
@@ -18,13 +19,21 @@ from app.history import AlreadyRunningError, History, run_lock
 from app.models import Settings, TargetResult
 from app.notifier import send_dingtalk_notification, send_telegram_notification
 from app.privacy import RedactingFormatter, build_target_aliases, redact_text, target_alias
+from app.recovery import classify_failure, manual_retry_allowed
 from app.sender import send_message
 
 
 LOGGER = logging.getLogger("douyin_sender")
 
 
-async def run(dry_run: bool = False, env_file: str | None = None) -> int:
+RetryMode = Literal["failed", "unconfirmed"]
+
+
+async def run(
+    dry_run: bool = False,
+    env_file: str | None = None,
+    retry_mode: RetryMode | None = None,
+) -> int:
     settings = load_settings(env_file)
     task = load_task(settings)
     settings.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -36,6 +45,8 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
 
     history = History(settings.artifacts_dir / "history.json")
     run_date = history.run_date(task.timezone)
+    if retry_mode == "unconfirmed":
+        LOGGER.warning("显式重试未确认消息：这些消息可能已经发送，存在重复发送风险")
     results: list[TargetResult] = []
     screenshots: list[Path] = []
     fatal_error: Exception | None = None
@@ -65,31 +76,58 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
                 for index, target in enumerate(task.targets):
                     sent = 0
                     alias = target_alias(index)
+                    plans = _message_plans(history, task.task_id, run_date, target)
+                    selected, duplicate_count = _select_message_plans(
+                        history,
+                        plans,
+                        dry_run=dry_run,
+                        prevent_duplicates=task.prevent_duplicates,
+                        retry_mode=retry_mode,
+                    )
+                    if not dry_run and not selected:
+                        status = "duplicate" if duplicate_count else "skipped"
+                        results.append(TargetResult(target=target.name, status=status, target_alias=alias))
+                        continue
+                    current_key: str | None = None
+                    opened = False
                     try:
                         LOGGER.info("处理好友: %s", alias)
                         await chat.open_target(target.name, retries=task.target_open_retries)
+                        opened = True
                         if not dry_run:
-                            for message_index, message in enumerate(target.messages):
-                                message_id = _message_id(message_index, message)
-                                key = history.key(task.task_id, run_date, target.name, message_id)
-                                if task.prevent_duplicates and history.contains(key):
-                                    LOGGER.info(
-                                        "跳过当天已处理或结果不确定的消息: %s #%d",
-                                        alias,
-                                        message_index + 1,
-                                    )
+                            for selected_index, (message_index, message, message_id, key) in enumerate(selected):
+                                current_key = key
+                                began = history.reserve(
+                                    key,
+                                    target_key=target.name,
+                                    display_name=target.name,
+                                    message_id=message_id,
+                                    allow_success_override=retry_mode is None and not task.prevent_duplicates,
+                                )
+                                if not began:
+                                    duplicate_count += 1
+                                    current_key = None
                                     continue
-                                if task.prevent_duplicates:
-                                    history.reserve(key)
                                 await verify_login(page, timeout_ms=3_000)
                                 await send_message(page, chat, message, task.stickers)
-                                if task.prevent_duplicates:
-                                    history.mark_success(key)
+                                history.mark_success(key)
+                                current_key = None
                                 sent += 1
-                                if message_index < len(target.messages) - 1:
+                                if selected_index < len(selected) - 1:
                                     await asyncio.sleep(random.uniform(task.interval_min, task.interval_max))
-                        results.append(TargetResult(target=target.name, status="success", sent=sent, target_alias=alias))
+                        status = "success" if sent or dry_run else "duplicate"
+                        results.append(TargetResult(target=target.name, status=status, sent=sent, target_alias=alias))
                     except (AuthenticationError, RiskControlError) as exc:
+                        category = classify_failure(exc, stage="send" if opened else "target_open")
+                        _persist_target_failure(
+                            history,
+                            selected,
+                            current_key=current_key,
+                            category=category,
+                            error=redact_text(str(exc), aliases),
+                            target_name=target.name,
+                            opened=opened,
+                        )
                         LOGGER.exception("处理好友时登录状态失效: %s", alias)
                         screenshot = await _screenshot(page, settings.artifacts_dir, alias)
                         if screenshot:
@@ -100,10 +138,29 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
                                 trace_saved = True
                             except Exception:
                                 LOGGER.exception("保存 trace 失败")
-                        results.append(TargetResult(target=target.name, status="failed", sent=sent, error=str(exc), target_alias=alias))
+                        results.append(
+                            TargetResult(
+                                target=target.name,
+                                status="failed",
+                                sent=sent,
+                                error=str(exc),
+                                target_alias=alias,
+                                failure_category=category,
+                            )
+                        )
                         fatal_error = exc
                         break
                     except Exception as exc:
+                        category = classify_failure(exc, stage="send" if opened else "target_open")
+                        _persist_target_failure(
+                            history,
+                            selected,
+                            current_key=current_key,
+                            category=category,
+                            error=redact_text(str(exc), aliases),
+                            target_name=target.name,
+                            opened=opened,
+                        )
                         LOGGER.exception("好友处理失败: %s", alias)
                         screenshot = await _screenshot(page, settings.artifacts_dir, alias)
                         if screenshot:
@@ -114,7 +171,17 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
                                 trace_saved = True
                             except Exception:
                                 LOGGER.exception("保存 trace 失败")
-                        results.append(TargetResult(target=target.name, status="failed", sent=sent, error=str(exc), target_alias=alias))
+                        status = "unconfirmed" if category == "send_unconfirmed" else "failed"
+                        results.append(
+                            TargetResult(
+                                target=target.name,
+                                status=status,
+                                sent=sent,
+                                error=str(exc),
+                                target_alias=alias,
+                                failure_category=category,
+                            )
+                        )
                         if not task.continue_on_error:
                             break
                     if index < len(task.targets) - 1 and not dry_run:
@@ -136,9 +203,9 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
     _write_results(settings.artifacts_dir, task.task_id, dry_run, results, aliases)
     await _notify_dingtalk(settings, task.task_id, dry_run, results, screenshots)
     await _notify_telegram(settings, task.task_id, dry_run, results)
-    succeeded = sum(result.status == "success" for result in results)
-    failed = sum(result.status == "failed" for result in results)
-    LOGGER.info("执行结束: 成功 %d，失败 %d", succeeded, failed)
+    succeeded = sum(result.status in {"success", "duplicate", "skipped"} for result in results)
+    failed = sum(result.status in {"failed", "unconfirmed"} for result in results)
+    LOGGER.info("执行结束: 成功/跳过 %d，失败或未确认 %d", succeeded, failed)
     if fatal_error is not None:
         raise fatal_error
     return 1 if failed else 0
@@ -149,7 +216,13 @@ def main() -> int:
     try:
         settings = load_settings(args.env_file)
         with run_lock(settings.artifacts_dir / "run.lock"):
-            return asyncio.run(run(dry_run=args.dry_run, env_file=args.env_file))
+            return asyncio.run(
+                run(
+                    dry_run=args.dry_run,
+                    env_file=args.env_file,
+                    retry_mode=_retry_mode(args),
+                )
+            )
     except (ConfigError, AuthenticationError, RiskControlError, SearchBoxNotReadyError, AlreadyRunningError) as exc:
         print(f"错误: {exc}")
         return 2
@@ -160,9 +233,87 @@ def main() -> int:
 
 def _parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="向多个抖音好友发送配置的消息")
-    parser.add_argument("--dry-run", action="store_true", help="只验证登录和好友，不发送消息")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="只验证登录和好友，不发送消息")
+    mode.add_argument("--retry-failed", action="store_true", help="只重试当天明确失败且允许重试的消息")
+    mode.add_argument(
+        "--retry-unconfirmed",
+        action="store_true",
+        help="人工重试当天未确认消息；可能重复发送，自动流程不得使用",
+    )
     parser.add_argument("--env-file", help="指定 .env 文件路径")
     return parser.parse_args()
+
+
+def _retry_mode(args: argparse.Namespace) -> RetryMode | None:
+    if getattr(args, "retry_failed", False):
+        return "failed"
+    if getattr(args, "retry_unconfirmed", False):
+        return "unconfirmed"
+    return None
+
+
+def _message_plans(history: History, task_id: str, run_date: str, target) -> list[tuple[int, object, str, str]]:
+    plans = []
+    for message_index, message in enumerate(target.messages):
+        message_id = _message_id(message_index, message)
+        key = history.key(task_id, run_date, target.name, message_id)
+        plans.append((message_index, message, message_id, key))
+    return plans
+
+
+def _select_message_plans(
+    history: History,
+    plans: list[tuple[int, object, str, str]],
+    *,
+    dry_run: bool,
+    prevent_duplicates: bool,
+    retry_mode: RetryMode | None,
+) -> tuple[list[tuple[int, object, str, str]], int]:
+    if dry_run:
+        return plans, 0
+    if retry_mode == "failed":
+        allowed = history.retryable_failed_keys()
+        return [plan for plan in plans if plan[3] in allowed], 0
+    if retry_mode == "unconfirmed":
+        allowed = history.unconfirmed_keys()
+        return [plan for plan in plans if plan[3] in allowed], 0
+    if not prevent_duplicates:
+        return plans, 0
+    selected = [plan for plan in plans if not history.contains(plan[3])]
+    return selected, len(plans) - len(selected)
+
+
+def _persist_target_failure(
+    history: History,
+    selected: list[tuple[int, object, str, str]],
+    *,
+    current_key: str | None,
+    category,
+    error: str,
+    target_name: str,
+    opened: bool,
+) -> None:
+    keys = [current_key] if current_key else ([] if opened else [plan[3] for plan in selected])
+    plan_by_key = {plan[3]: plan for plan in selected}
+    for key in keys:
+        if key is None:
+            continue
+        entry = history.entry(key)
+        if entry is None:
+            plan = plan_by_key[key]
+            began = history.reserve(
+                key,
+                target_key=target_name,
+                display_name=target_name,
+                message_id=plan[2],
+            )
+            if not began:
+                continue
+        if category == "send_unconfirmed":
+            history.mark_unconfirmed(key, error)
+        else:
+            history.mark_failed(key, category, error)
 
 
 def _configure_logging(

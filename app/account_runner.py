@@ -63,7 +63,12 @@ def run_all_accounts() -> int:
                 settings = load_settings(None)
                 _configure_logging(settings.artifacts_dir, label=account.id, reset=True)
                 with run_lock(settings.artifacts_dir / "run.lock"):
-                    code = asyncio.run(run(dry_run=args.dry_run))
+                    kwargs = {"dry_run": args.dry_run}
+                    if getattr(args, "retry_failed", False):
+                        kwargs["retry_mode"] = "failed"
+                    elif getattr(args, "retry_unconfirmed", False):
+                        kwargs["retry_mode"] = "unconfirmed"
+                    code = asyncio.run(run(**kwargs))
             status = "success" if code == 0 else "failed"
             summary.append((account.id, status, None))
             LOGGER.info("执行完成: %s", status)

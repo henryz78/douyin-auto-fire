@@ -43,3 +43,54 @@ def manual_retry_allowed(category: FailureCategory | None, attempt_count: int, l
 
 def auto_retry_allowed(category: FailureCategory | None, attempt_count: int, limit: int = DEFAULT_RETRY_LIMIT) -> bool:
     return attempt_count < limit and retry_policy(category).auto_retry_allowed
+
+
+def classify_failure(exc: Exception, *, stage: str) -> FailureCategory:
+    name = type(exc).__name__
+    message = str(exc)
+    lowered = message.lower()
+    uppered = message.upper()
+
+    if name == "AuthenticationError":
+        return "login_required"
+    if name == "RiskControlError":
+        return "risk_control"
+    if name == "RateLimitedError":
+        return "rate_limited"
+    if name == "SearchBoxNotReadyError":
+        return "selector_not_ready"
+    if stage == "browser_startup":
+        return "browser_startup"
+    if "搜索不到目标好友" in message:
+        return "friend_not_found"
+    if any(
+        marker in message
+        for marker in (
+            "无法确认是否发送成功",
+            "发送状态未能确认",
+            "没有检测到新的已发送消息",
+            "没有检测到新的消息",
+        )
+    ):
+        return "send_unconfirmed"
+    if "发送失败" in message and "重试" in message:
+        return "send_rejected"
+    if "找不到" in message or "未能写入" in message or "未就绪" in message:
+        return "selector_not_ready"
+    transient_markers = (
+        "ERR_CONNECTION_CLOSED",
+        "ERR_CONNECTION_RESET",
+        "ERR_CONNECTION_REFUSED",
+        "ERR_CONNECTION_ABORTED",
+        "ERR_NETWORK_CHANGED",
+        "ERR_NETWORK_ACCESS_DENIED",
+        "ERR_PROXY_CONNECTION_FAILED",
+        "ERR_TUNNEL_CONNECTION_FAILED",
+        "ERR_INTERNET_DISCONNECTED",
+        "ERR_NAME_NOT_RESOLVED",
+    )
+    if any(marker in uppered for marker in transient_markers):
+        return "transient_network"
+    if "ERR_TIMED_OUT" in uppered or "timeout" in lowered or "超时" in message:
+        return "navigation_timeout" if stage in {"navigation", "target_open"} else "transient_network"
+    return "non_retryable"
