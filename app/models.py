@@ -6,6 +6,20 @@ from typing import Literal
 
 
 MessageType = Literal["text", "image", "douyin_sticker", "random"]
+TargetStatus = Literal["pending", "success", "failed", "unconfirmed", "skipped", "duplicate"]
+FailureCategory = Literal[
+    "transient_network",
+    "navigation_timeout",
+    "browser_startup",
+    "selector_not_ready",
+    "friend_not_found",
+    "login_required",
+    "risk_control",
+    "rate_limited",
+    "send_unconfirmed",
+    "send_rejected",
+    "non_retryable",
+]
 
 
 @dataclass(frozen=True)
@@ -80,7 +94,13 @@ class Settings:
 @dataclass(frozen=True)
 class TargetResult:
     target: str
-    status: Literal["success", "failed", "skipped", "duplicate", "unknown"]
+    status: TargetStatus
     sent: int = 0
     error: str | None = None
     target_alias: str | None = None
+    failure_category: FailureCategory | None = None
+    attempt_count: int = 0
+    first_attempt_at: str | None = None
+    last_attempt_at: str | None = None
+    retryable: bool = False
+    artifacts: tuple[str, ...] = ()
