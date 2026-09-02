@@ -36,13 +36,14 @@ async def run(
     dry_run: bool = False,
     env_file: str | None = None,
     retry_mode: RetryMode | None = None,
+    run_id: str | None = None,
 ) -> int:
     settings = load_settings(env_file)
     task = load_task(settings)
     settings.artifacts_dir.mkdir(parents=True, exist_ok=True)
     aliases = build_target_aliases(task.targets)
     _configure_logging(settings.artifacts_dir, aliases)
-    run_id = uuid.uuid4().hex
+    run_id = run_id or uuid.uuid4().hex
     started_at = datetime.now().astimezone().isoformat()
 
     if not settings.storage_state and not settings.cookie:
@@ -270,12 +271,14 @@ def main() -> int:
     args = _parse_cli_args()
     try:
         settings = load_settings(args.env_file)
-        with run_lock(settings.artifacts_dir / "run.lock", account_id=settings.account_id):
+        run_id = uuid.uuid4().hex
+        with run_lock(settings.artifacts_dir / "run.lock", run_id=run_id, account_id=settings.account_id):
             return asyncio.run(
                 run(
                     dry_run=args.dry_run,
                     env_file=args.env_file,
                     retry_mode=_retry_mode(args),
+                    run_id=run_id,
                 )
             )
     except (ConfigError, AuthenticationError, RiskControlError, RateLimitedError, AccountCooldownError, SearchBoxNotReadyError, AlreadyRunningError) as exc:

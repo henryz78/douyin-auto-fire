@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -91,7 +92,7 @@ def test_run_all_accounts_account_failure_does_not_block_others(monkeypatch, tmp
     env_b = _env_file(tmp_path, ".env.b", "DOUYIN_COOKIE=cookie-b\n")
     seen: list[str] = []
 
-    async def fake_run(dry_run: bool = False, env_file: str | None = None) -> int:
+    async def fake_run(dry_run: bool = False, env_file: str | None = None, run_id: str | None = None) -> int:
         cookie = os.environ["DOUYIN_COOKIE"]
         seen.append(cookie)
         if cookie == "cookie-a":
@@ -115,7 +116,7 @@ def test_run_all_accounts_legacy_env_cleared_for_each_account(monkeypatch, tmp_p
     env_a = _env_file(tmp_path, ".env.a", "DOUYIN_COOKIE=cookie-a\n")
     seen: list[str] = []
 
-    async def fake_run(dry_run: bool = False, env_file: str | None = None) -> int:
+    async def fake_run(dry_run: bool = False, env_file: str | None = None, run_id: str | None = None) -> int:
         seen.append(os.environ["DOUYIN_COOKIE"])
         return 0
 
@@ -134,7 +135,7 @@ def test_run_all_accounts_all_success_returns_zero(monkeypatch, tmp_path: Path) 
     env_b = _env_file(tmp_path, ".env.b", "DOUYIN_COOKIE=cookie-b\n")
     calls = []
 
-    async def fake_run(dry_run: bool = False, env_file: str | None = None) -> int:
+    async def fake_run(dry_run: bool = False, env_file: str | None = None, run_id: str | None = None) -> int:
         calls.append(os.environ["DOUYIN_COOKIE"])
         return 0
 
@@ -151,7 +152,7 @@ def test_run_all_accounts_all_success_returns_zero(monkeypatch, tmp_path: Path) 
 def test_run_all_accounts_all_failed_returns_one(monkeypatch, tmp_path: Path) -> None:
     env_a = _env_file(tmp_path, ".env.a", "DOUYIN_COOKIE=cookie-a\n")
 
-    async def fake_run(dry_run: bool = False, env_file: str | None = None) -> int:
+    async def fake_run(dry_run: bool = False, env_file: str | None = None, run_id: str | None = None) -> int:
         raise RuntimeError("全部失败")
 
     monkeypatch.setattr(runner_module, "load_accounts", lambda: [_account("a", env_a)])
@@ -166,7 +167,7 @@ def test_run_all_accounts_all_failed_returns_one(monkeypatch, tmp_path: Path) ->
 def test_run_all_accounts_no_enabled_accounts_skips(monkeypatch) -> None:
     calls = []
 
-    async def fake_run(dry_run: bool = False, env_file: str | None = None) -> int:
+    async def fake_run(dry_run: bool = False, env_file: str | None = None, run_id: str | None = None) -> int:
         calls.append(1)
         return 0
 
@@ -183,7 +184,7 @@ def test_run_all_accounts_missing_env_file_fails_only_that_account(monkeypatch, 
     env_b = _env_file(tmp_path, ".env.b", "DOUYIN_COOKIE=cookie-b\n")
     seen: list[str] = []
 
-    async def fake_run(dry_run: bool = False, env_file: str | None = None) -> int:
+    async def fake_run(dry_run: bool = False, env_file: str | None = None, run_id: str | None = None) -> int:
         seen.append(os.environ["DOUYIN_COOKIE"])
         return 0
 
@@ -201,8 +202,13 @@ def test_run_all_accounts_uses_per_account_artifacts_dir(monkeypatch, tmp_path: 
     monkeypatch.chdir(tmp_path)
     env_a = _env_file(tmp_path, ".env.a", "DOUYIN_COOKIE=cookie-a\n")
     lock_dirs: list[Path] = []
+    run_ids: list[str] = []
 
-    async def fake_run(dry_run: bool = False, env_file: str | None = None) -> int:
+    async def fake_run(dry_run: bool = False, env_file: str | None = None, run_id: str | None = None) -> int:
+        payload = json.loads((Path(os.environ["ARTIFACTS_DIR"]) / "run.lock").read_text(encoding="utf-8"))
+        assert payload["run_id"] == run_id
+        assert payload["account_id"] == "a"
+        run_ids.append(run_id or "")
         return 0
 
     def fake_load_settings(env_file=None):
@@ -218,5 +224,6 @@ def test_run_all_accounts_uses_per_account_artifacts_dir(monkeypatch, tmp_path: 
 
     assert runner_module.run_all_accounts() == 0
     assert lock_dirs == [Path("artifacts") / "a"]
+    assert len(run_ids) == 1 and run_ids[0]
     assert (tmp_path / "artifacts" / "a").is_dir()
     assert not (tmp_path / "artifacts" / "a" / "run.lock").exists()

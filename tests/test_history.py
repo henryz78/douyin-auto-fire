@@ -112,6 +112,13 @@ def test_run_lock_contains_auditable_owner_metadata(tmp_path: Path) -> None:
     assert not path.exists()
 
 
+def test_current_process_identity_is_live_and_has_start_token() -> None:
+    alive, process_started_at = history_module._process_identity(__import__("os").getpid())
+
+    assert alive is True
+    assert process_started_at
+
+
 def test_run_lock_recovers_confirmed_dead_pid(monkeypatch, tmp_path: Path) -> None:
     path = tmp_path / "run.lock"
     path.write_text('{"pid": 999999, "process_started_at": "old", "run_id": "old"}', encoding="utf-8")

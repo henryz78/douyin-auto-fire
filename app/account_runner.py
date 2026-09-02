@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -62,8 +63,9 @@ def run_all_accounts() -> int:
             ):
                 settings = load_settings(None)
                 _configure_logging(settings.artifacts_dir, label=account.id, reset=True)
-                with run_lock(settings.artifacts_dir / "run.lock", account_id=account.id):
-                    kwargs = {"dry_run": args.dry_run}
+                run_id = uuid.uuid4().hex
+                with run_lock(settings.artifacts_dir / "run.lock", run_id=run_id, account_id=account.id):
+                    kwargs = {"dry_run": args.dry_run, "run_id": run_id}
                     if getattr(args, "retry_failed", False):
                         kwargs["retry_mode"] = "failed"
                     elif getattr(args, "retry_unconfirmed", False):

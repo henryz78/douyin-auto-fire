@@ -337,9 +337,23 @@ def _windows_process_identity(pid: int) -> tuple[bool | None, str | None]:
     import ctypes
     from ctypes import wintypes
 
-    process = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessTimes.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    )
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    process = kernel32.OpenProcess(0x1000, False, pid)
     if not process:
-        error = ctypes.windll.kernel32.GetLastError()
+        error = ctypes.get_last_error()
         if error in {87, 1168}:
             return False, None
         return None, None
@@ -348,7 +362,7 @@ def _windows_process_identity(pid: int) -> tuple[bool | None, str | None]:
     kernel = wintypes.FILETIME()
     user = wintypes.FILETIME()
     try:
-        if not ctypes.windll.kernel32.GetProcessTimes(
+        if not kernel32.GetProcessTimes(
             process,
             ctypes.byref(creation),
             ctypes.byref(exit_time),
@@ -359,4 +373,4 @@ def _windows_process_identity(pid: int) -> tuple[bool | None, str | None]:
         token = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
         return True, str(token)
     finally:
-        ctypes.windll.kernel32.CloseHandle(process)
+        kernel32.CloseHandle(process)

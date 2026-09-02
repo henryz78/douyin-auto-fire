@@ -101,6 +101,30 @@ async def test_browser_start_failure_still_notifies(monkeypatch, tmp_path) -> No
 
 
 @pytest.mark.asyncio
+async def test_run_uses_provided_run_id_in_structured_result(monkeypatch, tmp_path) -> None:
+    settings = _settings(tmp_path)
+
+    @asynccontextmanager
+    async def broken_open_douyin(_settings):
+        raise RuntimeError("浏览器启动失败")
+        yield
+
+    write_results = MagicMock()
+    monkeypatch.setattr(main_module, "load_settings", lambda _env=None: settings)
+    monkeypatch.setattr(main_module, "load_task", lambda _settings: _task())
+    monkeypatch.setattr(main_module, "open_douyin", broken_open_douyin)
+    monkeypatch.setattr(main_module, "_write_results", write_results)
+    monkeypatch.setattr(main_module, "_notify_dingtalk", AsyncMock())
+    monkeypatch.setattr(main_module, "_notify_telegram", AsyncMock())
+    monkeypatch.setattr(main_module, "_configure_logging", lambda _path, _aliases=None: None)
+
+    with pytest.raises(RuntimeError, match="浏览器启动失败"):
+        await main_module.run(run_id="shared-run-id")
+
+    assert write_results.call_args.kwargs["run_id"] == "shared-run-id"
+
+
+@pytest.mark.asyncio
 async def test_waits_between_consecutive_messages_for_same_friend(monkeypatch, tmp_path) -> None:
     settings = _settings(tmp_path)
     messages = (Message(type="text", content="一"), Message(type="text", content="二"))
