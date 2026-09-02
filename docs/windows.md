@@ -1,153 +1,96 @@
 # Windows 电脑部署教程
 
-本教程介绍如何在 Windows 电脑上运行 `douyin-auto-fire`。
+本教程介绍如何在 Windows 电脑上运行 `douyin-auto-fire`，支持扫码登录、Cookie 登录、单账号、多账号、钉钉通知、Dry Run 和任务计划程序定时运行。
 
-Windows 部署适合：
-
-- 想先在自己的电脑上测试项目；
-- 不想使用 GitHub Actions；
-- 希望直接扫码登录生成本地登录状态；
-- 希望配合 Windows 任务计划程序每天自动运行。
-
-> Windows 电脑需要在任务执行时保持开机并联网。如果电脑关机，任务无法正常运行。
+> Windows 电脑需要在任务执行时保持开机并联网。第一次建议先配置 1 个账号、1 个好友、1 条文字消息，先把单账号跑通，再增加多账号或通知。
 
 ---
 
 ## 1. 安装 Python
 
-项目建议使用 Python 3.11 或更高版本。
-
-下载地址：
+建议 Python 3.11 或更高版本：
 
 **https://www.python.org/downloads/**
 
-安装时建议勾选：
+安装时勾选：
 
 ```text
 Add Python to PATH
 ```
 
-安装完成后打开 PowerShell：
+检查：
 
 ```powershell
 python --version
-```
-
-如果系统同时安装了多个 Python，也可以执行：
-
-```powershell
-py --version
 ```
 
 ---
 
 ## 2. 安装 Git
 
-如果电脑还没有 Git，可以安装：
-
 **https://git-scm.com/download/win**
 
-安装后检查：
+检查：
 
 ```powershell
 git --version
 ```
 
-如果不想安装 Git，也可以直接在 GitHub 页面点击 **Code → Download ZIP** 下载项目并解压。
+也可以直接从 GitHub 下载 ZIP，但长期使用更推荐 Git clone，后续更新更方便。
 
 ---
 
 ## 3. 下载项目
-
-使用 Git：
 
 ```powershell
 git clone https://github.com/unmev/douyin-auto-fire.git
 cd douyin-auto-fire
 ```
 
-建议把项目放在一个固定路径，例如：
+建议放在固定路径，例如：
 
 ```text
 C:\douyin-auto-fire
 ```
 
-如果以后要使用 Windows 任务计划程序，尽量不要频繁移动这个目录。
-
 ---
 
-## 4. 创建 Python 虚拟环境
-
-在项目目录打开 PowerShell：
+## 4. 创建虚拟环境
 
 ```powershell
 py -3.11 -m venv .venv
 ```
 
-如果电脑只有一个 Python，也可以使用：
+如果只有一个 Python：
 
 ```powershell
 python -m venv .venv
 ```
 
-后续教程直接调用虚拟环境中的 Python，不需要手动执行激活脚本。
-
 ---
 
-## 5. 安装项目依赖
-
-执行：
+## 5. 安装依赖和 Chromium
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
----
-
-## 6. 安装 Chromium
-
-执行：
-
-```powershell
 .\.venv\Scripts\python.exe -m playwright install chromium
 ```
 
-Playwright 会自动下载项目运行需要的 Chromium 浏览器。
-
 ---
 
-## 7. 配置发送内容
-
-复制示例配置：
+## 6. 单账号：配置发送内容
 
 ```powershell
 Copy-Item config.example.json config.json
-```
-
-然后打开：
-
-```powershell
 notepad config.json
 ```
 
-也可以直接使用在线配置生成器：
+也可以使用配置生成器：
 
 **https://douyin-config.pages.dev/**
 
-将生成的 JSON 完整保存到：
-
-```text
-config.json
-```
-
-第一次建议只配置：
-
-```text
-1 个好友 + 1 条文字消息
-```
-
-例如：
+一个最简单的配置：
 
 ```json
 {
@@ -165,94 +108,45 @@ config.json
 
 ---
 
-# 8. 登录抖音
+## 7. 单账号：扫码登录
 
-Windows 推荐直接使用项目自带的扫码登录脚本。
-
-执行：
+Windows 推荐先使用项目自带登录脚本：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\login.py
 ```
 
-程序会自动打开 Chromium。
+浏览器打开后扫码登录，确认进入抖音首页，再回到终端按 Enter。
 
-按照浏览器中的提示完成抖音扫码登录。
-
-登录完成并看到抖音首页后，回到 PowerShell，根据提示按一次 **Enter**。
-
-程序会生成：
+成功后生成：
 
 ```text
 storage-state.json
 ```
 
-这个文件保存当前登录状态。
-
-> ⚠️ `storage-state.json` 相当于账号登录凭证，不要发送给其他人，也不要上传到公开仓库。
-
-项目的 `.gitignore` 已经忽略 `storage-state.json`。
+> `storage-state.json` 相当于登录凭证，不要上传或分享。
 
 ---
 
-## 9. 第一次运行 Dry Run
-
-先不要真实发送消息。
-
-执行：
+## 8. 第一次运行 Dry Run
 
 ```powershell
 .\.venv\Scripts\python.exe run.py --dry-run
 ```
 
-Dry Run 会检查：
+Dry Run 会检查登录状态、好友定位和配置，但不会真正发送消息。
 
-- 登录状态是否有效；
-- 是否能够正常进入抖音私信页；
-- 是否能够找到目标好友；
-- 配置是否正确。
-
-但不会真正发送消息。
-
-如果运行成功，再进入下一步。
-
----
-
-## 10. 测试真实发送
-
-执行：
+成功后再运行：
 
 ```powershell
 .\.venv\Scripts\python.exe run.py
 ```
 
-这次会真正向配置中的好友发送消息。
-
-第一次建议仍然只保留一个测试好友。
-
-确认：
-
-- 好友没有发错；
-- 文字内容正确；
-- 程序可以正常结束。
-
-确认无误后再增加其他好友或消息。
-
 ---
 
-## 11. 切换为无头模式
+## 9. 无头模式
 
-第一次扫码登录和排查问题时，可以让浏览器正常显示。
-
-日常自动运行建议使用 Headless 模式。
-
-在项目根目录新建：
-
-```text
-.env
-```
-
-可以执行：
+日常自动运行建议在根目录创建 `.env`：
 
 ```powershell
 notepad .env
@@ -262,6 +156,9 @@ notepad .env
 
 ```env
 HEADLESS=true
+
+DINGTALK_WEBHOOK=
+DINGTALK_SECRET=
 ```
 
 如需固定出口代理，可在 `.env` 中继续加入：
@@ -284,51 +181,41 @@ HTTP 支持可选用户名和密码，并可通过 CONNECT 访问 HTTPS 页面�
 
 ---
 
-## 12. 使用 Cookie 登录（可选）
+## 10. 使用 Cookie 登录（可选）
 
-如果不想运行扫码登录脚本，也可以和 GitHub Actions 一样使用 Cookie。
+如果不想使用扫码生成的 `storage-state.json`，也可以用 Cookie。
 
-先在正常浏览器中登录抖音，再使用 Cookie-Editor 导出完整 JSON。
+详细获取步骤参考：[GitHub Actions 教程 - 获取 Cookie](github-actions.md#3-获取抖音-cookie)
 
-详细步骤：
-
-👉 [GitHub Actions 教程中的 Cookie 获取步骤](github-actions.md#3-获取抖音-cookie)
-
-然后打开 `.env`：
-
-```powershell
-notepad .env
-```
-
-将 Cookie 压缩为单行 JSON 后写入：
+在 `.env` 中写入单行 JSON：
 
 ```env
 DOUYIN_COOKIE=[{"name":"xxx","value":"xxx","domain":".douyin.com","path":"/"}]
 HEADLESS=true
 ```
 
-如果项目目录里同时存在有效的 `storage-state.json`，程序会优先使用 `storage-state.json`。
-
-如果想完全改用 Cookie，可以先删除旧的：
+如果同时存在有效的 `storage-state.json`，程序会优先使用它。想完全改用 Cookie，可以删除：
 
 ```powershell
 Remove-Item storage-state.json
 ```
 
-> Cookie 和 `storage-state.json` 都属于登录凭证，不要提交到 GitHub。
-
 ---
 
-## 13. 配置钉钉通知（可选）
+## 11. 通知（可选）
 
-如果希望每次运行后收到钉钉通知，在 `.env` 中继续加入：
+在 `.env` 中填写：
 
 ```env
-DINGTALK_WEBHOOK=你的钉钉Webhook
-DINGTALK_SECRET=你的钉钉Secret
+DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxxx
+DINGTALK_SECRET=SECxxxx
 ```
 
-两个参数必须同时填写。
+两个参数必须同时填写。通知会包含任务模式、成功/失败人数和失败原因。
+
+如果不需要通知，两个值保持为空即可。
+
+多账号模式下，全局 `.env` 的钉钉配置会被账号继承；如果某个账号需要单独机器人，可以在该账号自己的 `.env.account*` 文件中覆盖。
 
 如果需要 Telegram 通知，可以在 `.env` 中加入：
 
@@ -339,19 +226,143 @@ TELEGRAM_CHAT_ID=-1001234567890
 
 这两个参数必须同时填写。钉钉和 Telegram 可以同时启用，通知失败不会影响抖音任务结果。
 
-例如：
+---
+
+## 12. 多账号（可选）
+
+Windows 也支持多账号。只要项目根目录存在：
+
+```text
+config\accounts.json
+```
+
+程序就会自动进入多账号模式，并串行执行所有启用账号。
+
+### 12.1 创建目录
+
+```powershell
+New-Item -ItemType Directory -Force config\tasks | Out-Null
+New-Item -ItemType Directory -Force storage_state | Out-Null
+```
+
+### 12.2 创建 `config\accounts.json`
+
+```powershell
+notepad config\accounts.json
+```
+
+示例：
+
+```json
+{
+  "accounts": [
+    {
+      "id": "account1",
+      "enabled": true,
+      "env_file": ".env.account1"
+    },
+    {
+      "id": "account2",
+      "enabled": true,
+      "env_file": ".env.account2"
+    }
+  ]
+}
+```
+
+如果暂时不运行某个账号：
+
+```json
+"enabled": false
+```
+
+### 12.3 每个账号创建独立环境文件
+
+账号 1：
+
+```powershell
+notepad .env.account1
+```
+
+推荐使用独立 Cookie：
 
 ```env
-HEADLESS=true
+DOUYIN_COOKIE=[{"name":"账号1Cookie","value":"xxx","domain":".douyin.com","path":"/"}]
+TASK_CONFIG=config/tasks/account1.json
+```
+
+账号 2：
+
+```powershell
+notepad .env.account2
+```
+
+```env
+DOUYIN_COOKIE=[{"name":"账号2Cookie","value":"xxx","domain":".douyin.com","path":"/"}]
+TASK_CONFIG=config/tasks/account2.json
+```
+
+如果账号 2 使用独立钉钉机器人，可以追加：
+
+```env
 DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxxx
 DINGTALK_SECRET=SECxxxx
 ```
 
+### 12.4 每个账号创建任务配置
+
+```powershell
+notepad config\tasks\account1.json
+notepad config\tasks\account2.json
+```
+
+每个账号可以配置不同好友、消息、发送间隔和防重复设置。
+
+### 12.5 使用独立扫码登录状态（可选）
+
+当前 `scripts\login.py` 默认只生成根目录的 `storage-state.json`，因此多账号最省事的方式是每个账号直接使用 Cookie。
+
+如果你已经自行准备了独立 Storage State，也可以在账号 env 中指定：
+
+```env
+DOUYIN_STORAGE_STATE=storage_state/account1.json
+TASK_CONFIG=config/tasks/account1.json
+```
+
+Cookie 和 Storage State 二选一即可。
+
+### 12.6 测试多账号
+
+```powershell
+.\.venv\Scripts\python.exe run.py --dry-run
+```
+
+日志会出现类似：
+
+```text
+多账号模式：共 2 个启用账号
+[account1] ...
+[account2] ...
+```
+
+运行产物默认分开保存：
+
+```text
+artifacts\account1\
+artifacts\account2\
+```
+
+确认正常后：
+
+```powershell
+.\.venv\Scripts\python.exe run.py
+```
+
+> 删除或重命名 `config\accounts.json` 后，程序会恢复单账号模式。
+
 ---
 
-# 14. 配置 Windows 每天自动运行
-
-如果希望电脑每天自动运行，可以使用 Windows 自带的 **任务计划程序**。
+## 13. 配置 Windows 任务计划程序
 
 按 `Win + R`，输入：
 
@@ -359,47 +370,17 @@ DINGTALK_SECRET=SECxxxx
 taskschd.msc
 ```
 
-打开任务计划程序。
-
-点击：
-
-```text
-创建基本任务
-```
-
-任务名称可以填写：
+点击“创建基本任务”，名称例如：
 
 ```text
 Douyin Auto Fire
 ```
 
-触发器选择：
-
-```text
-每天
-```
-
-然后设置希望运行的时间。
-
----
-
-## 15. 配置任务操作
-
-操作选择：
-
-```text
-启动程序
-```
-
-假设项目路径是：
-
-```text
-C:\douyin-auto-fire
-```
+触发器选择“每天”，设置运行时间。
 
 ### 程序或脚本
 
-填写：
+假设项目位于 `C:\douyin-auto-fire`：
 
 ```text
 C:\douyin-auto-fire\.venv\Scripts\python.exe
@@ -407,147 +388,83 @@ C:\douyin-auto-fire\.venv\Scripts\python.exe
 
 ### 添加参数
 
-填写：
-
 ```text
 run.py
 ```
 
 ### 起始于
 
-填写：
-
 ```text
 C:\douyin-auto-fire
 ```
 
-> **“起始于”一定要填写项目目录。** 否则程序可能找不到 `config.json`、`.env` 或 `storage-state.json`。
+> “起始于”必须填写项目根目录，否则程序可能找不到 `.env`、`config.json` 或 `config\accounts.json`。
 
-保存任务即可。
+单账号和多账号都使用同一个 `run.py`，不需要为每个账号创建多个计划任务。
 
 ---
 
-## 16. 测试任务计划程序
+## 14. 测试任务计划程序
 
-找到刚刚创建的任务：
+找到刚创建的任务，右键“运行”。
 
-```text
-Douyin Auto Fire
-```
-
-右键选择：
-
-```text
-运行
-```
-
-然后检查项目目录：
-
-```text
-artifacts\run.log
-```
-
-也可以在 PowerShell 中执行：
+查看单账号日志：
 
 ```powershell
 Get-Content .\artifacts\run.log -Tail 100
 ```
 
-如果日志正常，说明任务计划程序配置成功。
+多账号日志：
+
+```powershell
+Get-Content .\artifacts\account1\run.log -Tail 100
+Get-Content .\artifacts\account2\run.log -Tail 100
+```
 
 ---
 
-## 17. 查看运行结果
+## 15. 登录失效
 
-项目运行后的诊断文件位于：
-
-```text
-artifacts\
-```
-
-可能包含：
-
-```text
-run.log
-result.json
-history.json
-screenshots\
-traces\
-```
-
-查看最近日志：
-
-```powershell
-Get-Content .\artifacts\run.log -Tail 100
-```
-
-如果需要持续查看日志：
-
-```powershell
-Get-Content .\artifacts\run.log -Wait
-```
-
-> 截图和日志可能包含账号或聊天相关信息，不建议直接公开。
-
----
-
-## 18. 登录失效怎么办？
-
-如果日志提示：
-
-```text
-登录状态已失效
-安全验证
-需要重新登录
-```
-
-最简单的方法是重新运行：
+单账号扫码模式可以重新运行：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\login.py
 ```
 
-重新扫码登录。
+多账号 Cookie 模式则重新导出对应账号 Cookie，更新 `.env.account1`、`.env.account2` 等文件。
 
-新的 `storage-state.json` 会覆盖旧文件。
-
-然后先测试：
+更新后先执行：
 
 ```powershell
 .\.venv\Scripts\python.exe run.py --dry-run
 ```
 
-Dry Run 成功后即可继续自动运行。
-
 ---
 
-## 19. 更新项目
-
-如果是 Git 克隆的项目：
+## 16. 更新项目
 
 ```powershell
 cd C:\douyin-auto-fire
 git pull
-```
-
-然后更新 Python 依赖：
-
-```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-如果 Playwright 版本有变化，也可以重新执行：
+Playwright 版本变化后：
 
 ```powershell
 .\.venv\Scripts\python.exe -m playwright install chromium
 ```
 
-自己的这些文件不会被正常的 `git pull` 提交到仓库：
+这些本地敏感文件已被 `.gitignore` 忽略：
 
 ```text
 .env
+.env.account*
 config.json
+config\accounts.json
+config\tasks\
 storage-state.json
+storage_state\
 artifacts\
 ```
 
@@ -556,16 +473,16 @@ artifacts\
 ## 常用命令
 
 ```powershell
-# 扫码登录
+# 单账号扫码登录
 .\.venv\Scripts\python.exe scripts\login.py
 
-# Dry Run，只检查不发送
+# Dry Run（单账号 / 多账号都会自动识别）
 .\.venv\Scripts\python.exe run.py --dry-run
 
-# 真实发送
+# 正式运行
 .\.venv\Scripts\python.exe run.py
 
-# 查看最近 100 行日志
+# 查看主日志
 Get-Content .\artifacts\run.log -Tail 100
 
 # 更新项目
@@ -574,36 +491,18 @@ git pull
 
 ---
 
-## Windows 部署推荐流程
+## 注意事项
 
-```text
-安装 Python / Git
-        ↓
-下载项目
-        ↓
-创建 .venv
-        ↓
-安装依赖和 Chromium
-        ↓
-创建 config.json
-        ↓
-运行 scripts/login.py 扫码登录
-        ↓
-运行 --dry-run
-        ↓
-测试真实发送
-        ↓
-.env 设置 HEADLESS=true
-        ↓
-配置 Windows 任务计划程序
-        ↓
-每天自动运行
-```
+- Cookie、Storage State、`.env`、`.env.account*` 和钉钉密钥不要公开。
+- 多账号是串行执行，不会同时并发登录多个抖音账号。
+- 同一个抖音账号不要在多台机器同时运行自动发送任务。
+- 日志、截图和 Trace 可能包含聊天信息，请勿直接公开。
 
 ---
 
 ## 其他部署方式
 
-- 👉 [GitHub Actions 部署](github-actions.md)
-- 👉 [云服务器部署](server.md)
-- 👉 [返回项目主页](../README.md)
+- [GitHub Actions 部署](github-actions.md)
+- [Docker 部署](docker.md)
+- [Linux 云服务器部署](server.md)
+- [返回项目主页](../README.md)

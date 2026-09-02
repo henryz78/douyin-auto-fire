@@ -1,56 +1,36 @@
-# 云服务器部署教程
+# Linux 云服务器部署教程
 
-本教程介绍如何将 `douyin-auto-fire` 部署到 Linux 云服务器，并使用 `systemd` 每天自动运行。
+本教程介绍如何在 Ubuntu / Debian 云服务器上部署 `douyin-auto-fire`，支持单账号、多账号、钉钉通知、Dry Run 和 systemd 定时运行。
 
-推荐系统：
+推荐系统：Ubuntu 22.04 / 24.04、Debian 12 / 13。建议至少准备约 2 GB 内存，低内存机器可以增加 Swap。
 
-- Ubuntu 22.04 / 24.04
-- Debian 12 / 13
-
-> Playwright 需要运行 Chromium。建议服务器至少准备约 2 GB 内存；低内存机器可以尝试增加 Swap。
-
-服务器部署推荐使用 **Cookie + Headless Chromium + systemd Timer**。服务器不需要桌面环境。
+> 第一次使用建议先跑通 1 个账号、1 个好友、1 条文字消息。确认正常后，再增加多账号、原生表情、随机消息或钉钉通知。
 
 ---
 
-## 1. 准备抖音 Cookie
+## 1. 准备 Cookie
 
-先在自己的电脑浏览器登录抖音网页版：
+在自己的电脑浏览器登录抖音网页版，然后用 Cookie-Editor 导出完整 JSON。
 
-**https://www.douyin.com/**
+详细步骤参考：[GitHub Actions 教程 - 获取 Cookie](github-actions.md#3-获取抖音-cookie)
 
-然后使用 Cookie-Editor 导出当前抖音 Cookie，格式选择 **JSON**。
-
-获取 Cookie 的详细操作可以参考：
-
-👉 [GitHub Actions 教程中的 Cookie 获取步骤](github-actions.md#3-获取抖音-cookie)
-
-> ⚠️ Cookie 相当于账号登录凭证，请不要发送给其他人，也不要上传到公开仓库。
+> Cookie 相当于登录凭证，不要提交到公开仓库、Issue、日志或截图中。
 
 ---
 
 ## 2. 安装基础环境
 
-SSH 登录服务器后执行：
-
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip git curl
-```
-
-确认 Python 版本：
-
-```bash
 python3 --version
 ```
 
-建议使用 Python 3.11 或更高版本。
+建议 Python 3.11 或更高版本。
 
 ---
 
 ## 3. 创建运行用户
-
-为了避免长期使用 root 运行浏览器，创建一个专用用户：
 
 ```bash
 sudo useradd --system \
@@ -59,13 +39,11 @@ sudo useradd --system \
   douyin-sender
 ```
 
-如果提示用户已经存在，可以忽略。
+如果提示用户已存在，可以忽略。
 
 ---
 
 ## 4. 下载项目
-
-将项目克隆到 `/opt/douyin-auto-sender`：
 
 ```bash
 sudo git clone https://github.com/unmev/douyin-auto-fire.git /opt/douyin-auto-sender
@@ -73,76 +51,46 @@ sudo chown -R douyin-sender:douyin-sender /opt/douyin-auto-sender
 cd /opt/douyin-auto-sender
 ```
 
+国内服务器如果访问 GitHub 较慢，也可以使用 CNB 国内同步仓库：
+
+```bash
+sudo git clone https://cnb.cool/1mev/douyin-auto-fire.git /opt/douyin-auto-sender
+```
+
+GitHub 仍然是主仓库，CNB 用于国内加速。
+
 ---
 
-## 5. 创建 Python 虚拟环境
-
-使用专用用户创建虚拟环境：
+## 5. 创建虚拟环境并安装依赖
 
 ```bash
 sudo -u douyin-sender -H python3 -m venv /opt/douyin-auto-sender/.venv
-```
-
-安装项目依赖：
-
-```bash
 sudo -u douyin-sender -H /opt/douyin-auto-sender/.venv/bin/python -m pip install --upgrade pip
 sudo -u douyin-sender -H /opt/douyin-auto-sender/.venv/bin/pip install -r /opt/douyin-auto-sender/requirements.txt
 ```
 
----
-
-## 6. 安装 Chromium
-
-先安装 Chromium 所需的系统依赖：
+安装 Chromium 系统依赖和浏览器：
 
 ```bash
 sudo /opt/douyin-auto-sender/.venv/bin/python -m playwright install-deps chromium
-```
-
-然后使用真正执行任务的 `douyin-sender` 用户下载 Chromium：
-
-```bash
 sudo -u douyin-sender -H /opt/douyin-auto-sender/.venv/bin/python -m playwright install chromium
 ```
 
-> 这一步建议不要直接用 root 下载浏览器，否则后面 systemd 使用 `douyin-sender` 用户运行时可能找不到对应的 Playwright 浏览器文件。
-
 ---
 
-## 7. 配置发送内容
-
-进入项目目录：
+## 6. 单账号：配置发送内容
 
 ```bash
 cd /opt/douyin-auto-sender
-```
-
-复制示例配置：
-
-```bash
 sudo -u douyin-sender cp config.example.json config.json
-```
-
-编辑：
-
-```bash
 sudo -u douyin-sender nano config.json
 ```
 
-也可以在电脑上使用配置生成器生成 JSON：
+也可以用在线配置生成器：
 
 **https://douyin-config.pages.dev/**
 
-然后将生成的内容完整复制到 `config.json`。
-
-第一次建议只配置：
-
-```text
-1 个好友 + 1 条文字消息
-```
-
-例如：
+一个最简单的配置：
 
 ```json
 {
@@ -160,25 +108,16 @@ sudo -u douyin-sender nano config.json
 
 ---
 
-## 8. 保存 Cookie
+## 7. 单账号：保存 Cookie
 
-为了避免把 Cookie 放进 Git 仓库，推荐单独保存到 `/etc`。
-
-创建目录：
+为了避免把 Cookie 放到 Git 仓库，推荐单独放在 `/etc`：
 
 ```bash
 sudo mkdir -p /etc/douyin-auto-fire
-```
-
-创建 Cookie 文件：
-
-```bash
 sudo nano /etc/douyin-auto-fire/cookie.json
 ```
 
-将 Cookie-Editor 导出的完整 JSON 粘贴进去并保存。
-
-然后设置权限：
+粘贴 Cookie JSON 后设置权限：
 
 ```bash
 sudo chown root:douyin-sender /etc/douyin-auto-fire/cookie.json
@@ -187,19 +126,22 @@ sudo chmod 640 /etc/douyin-auto-fire/cookie.json
 
 ---
 
-## 9. 创建 `.env`
-
-创建项目环境变量文件：
+## 8. 创建 `.env`
 
 ```bash
 sudo -u douyin-sender nano /opt/douyin-auto-sender/.env
 ```
 
-写入：
+单账号推荐：
 
 ```env
 DOUYIN_COOKIE=/etc/douyin-auto-fire/cookie.json
+TASK_CONFIG=/opt/douyin-auto-sender/config.json
+ARTIFACTS_DIR=/opt/douyin-auto-sender/artifacts
 HEADLESS=true
+
+DINGTALK_WEBHOOK=
+DINGTALK_SECRET=
 ```
 
 如需固定出口代理，可继续加入：
@@ -212,24 +154,6 @@ DOUYIN_PROXY_PASSWORD=proxy-password
 
 HTTP 支持可选用户名和密码，并可通过 CONNECT 访问 HTTPS 页面；SOCKS5 仅支持无认证。代理失败时任务会直接失败，不会回退直连。
 
-如果需要钉钉通知，可以继续加入：
-
-```env
-DINGTALK_WEBHOOK=你的钉钉Webhook
-DINGTALK_SECRET=你的钉钉Secret
-```
-
-`DINGTALK_WEBHOOK` 和 `DINGTALK_SECRET` 必须同时填写。
-
-如果需要 Telegram 通知，可以继续加入：
-
-```env
-TELEGRAM_BOT_TOKEN=123456:你的BotToken
-TELEGRAM_CHAT_ID=-1001234567890
-```
-
-`TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 必须同时填写。钉钉和 Telegram 可以同时启用，任一通知失败都不会改变抖音任务结果。
-
 保存后可以限制 `.env` 权限：
 
 ```bash
@@ -238,120 +162,224 @@ sudo chmod 600 /opt/douyin-auto-sender/.env
 
 ---
 
+## 9. 通知（可选）
+
+如果希望每次运行结束后收到钉钉结果，在 `.env` 中填写：
+
+```env
+DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxxx
+DINGTALK_SECRET=SECxxxx
+```
+
+两个参数必须同时配置。通知会包含任务模式、成功/失败人数和失败原因。
+
+如果不需要通知，两个变量保持为空即可。
+
+多账号模式下，全局 `.env` 中的钉钉配置会被各账号继承；如果某个账号需要独立机器人，可以在该账号自己的 env 文件中覆盖这两个变量。
+
+如果需要 Telegram 通知，可以在 `.env` 中加入：
+
+```env
+TELEGRAM_BOT_TOKEN=123456:你的BotToken
+TELEGRAM_CHAT_ID=-1001234567890
+```
+
+`TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 必须同时填写。钉钉和 Telegram 可以同时启用，任一通知失败都不会改变抖音任务结果。
+
+---
+
 ## 10. 第一次运行 Dry Run
-
-不要第一次就直接发送消息。
-
-先执行：
 
 ```bash
 cd /opt/douyin-auto-sender
 sudo -u douyin-sender -H .venv/bin/python run.py --dry-run
 ```
 
-Dry Run 会检查：
+Dry Run 会验证登录状态、好友定位和任务配置，但不会真实发送消息。
 
-- Cookie 是否有效；
-- 是否可以进入抖音私信页；
-- 是否能够找到目标好友；
-- 配置是否正确。
-
-但 **不会真实发送消息**。
-
-如果运行成功，再进入下一步。
-
----
-
-## 11. 测试真实发送
-
-执行：
+确认成功后再真实运行：
 
 ```bash
-cd /opt/douyin-auto-sender
 sudo -u douyin-sender -H .venv/bin/python run.py
 ```
 
-这次会真实发送消息。
+---
 
-第一次建议仍然只保留一个测试好友，确认发送对象和内容全部正确以后再增加其他好友。
+## 11. 多账号（可选）
+
+Linux 本地运行原生支持多账号。只要创建：
+
+```text
+config/accounts.json
+```
+
+程序就会自动进入多账号模式，并串行执行所有启用账号。一个账号失败不会阻止后面的账号继续运行。
+
+### 11.1 创建目录
+
+```bash
+cd /opt/douyin-auto-sender
+sudo -u douyin-sender mkdir -p config/tasks storage_state
+```
+
+### 11.2 创建 `config/accounts.json`
+
+```bash
+sudo -u douyin-sender nano config/accounts.json
+```
+
+示例：
+
+```json
+{
+  "accounts": [
+    {
+      "id": "account1",
+      "enabled": true,
+      "env_file": ".env.account1"
+    },
+    {
+      "id": "account2",
+      "enabled": true,
+      "env_file": ".env.account2"
+    }
+  ]
+}
+```
+
+`enabled: false` 可以临时停用某个账号。
+
+### 11.3 每个账号创建独立 env
+
+账号 1：
+
+```bash
+sudo -u douyin-sender nano .env.account1
+```
+
+```env
+DOUYIN_COOKIE=/etc/douyin-auto-fire/account1.json
+TASK_CONFIG=config/tasks/account1.json
+```
+
+账号 2：
+
+```bash
+sudo -u douyin-sender nano .env.account2
+```
+
+```env
+DOUYIN_COOKIE=/etc/douyin-auto-fire/account2.json
+TASK_CONFIG=config/tasks/account2.json
+```
+
+如果希望账号 2 使用独立钉钉机器人，可以追加：
+
+```env
+DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxxx
+DINGTALK_SECRET=SECxxxx
+```
+
+### 11.4 保存每个账号 Cookie
+
+```bash
+sudo nano /etc/douyin-auto-fire/account1.json
+sudo nano /etc/douyin-auto-fire/account2.json
+sudo chown root:douyin-sender /etc/douyin-auto-fire/account*.json
+sudo chmod 640 /etc/douyin-auto-fire/account*.json
+```
+
+### 11.5 保存每个账号任务配置
+
+```bash
+sudo -u douyin-sender nano config/tasks/account1.json
+sudo -u douyin-sender nano config/tasks/account2.json
+```
+
+每个账号可以有完全不同的好友和消息配置。
+
+### 11.6 测试多账号
+
+```bash
+sudo -u douyin-sender -H .venv/bin/python run.py --dry-run
+```
+
+日志会出现类似：
+
+```text
+多账号模式：共 2 个启用账号
+[account1] ...
+[account2] ...
+```
+
+运行产物默认分开保存：
+
+```text
+artifacts/account1/
+artifacts/account2/
+```
+
+确认无误后再运行：
+
+```bash
+sudo -u douyin-sender -H .venv/bin/python run.py
+```
+
+> 删除或重命名 `config/accounts.json` 后，会恢复单账号模式。
 
 ---
 
 ## 12. 配置 systemd 自动运行
 
-项目已经自带 systemd 配置：
+项目自带：
 
 ```text
 deploy/systemd/douyin-sender.service
 deploy/systemd/douyin-sender.timer
 ```
 
-复制到 systemd：
+安装：
 
 ```bash
 sudo cp deploy/systemd/douyin-sender.service /etc/systemd/system/
 sudo cp deploy/systemd/douyin-sender.timer /etc/systemd/system/
-```
-
-重新加载 systemd：
-
-```bash
 sudo systemctl daemon-reload
-```
-
-启动并设置开机自启：
-
-```bash
 sudo systemctl enable --now douyin-sender.timer
 ```
 
-查看定时器：
+查看：
 
 ```bash
 systemctl list-timers --all | grep douyin-sender
 ```
 
+同一个 `run.py` 会自动识别单账号或多账号，所以 **systemd 不需要为每个账号创建一套 service**。
+
 ---
 
-## 13. 默认运行时间
+## 13. 修改每天运行时间
 
-项目自带的 Timer 默认是：
+默认 Timer 为每天服务器本地时间 08:00。
 
-```ini
-OnCalendar=*-*-* 08:00:00
-```
-
-也就是每天服务器本地时间 **08:00** 运行。
-
-建议先确认服务器时区：
+先确认时区：
 
 ```bash
 timedatectl
 ```
 
-如果希望使用北京时间：
+需要北京时间：
 
 ```bash
 sudo timedatectl set-timezone Asia/Shanghai
 ```
 
-然后再次确认：
-
-```bash
-timedatectl
-```
-
----
-
-## 14. 修改每天运行时间
-
-编辑：
+修改定时器：
 
 ```bash
 sudo nano /etc/systemd/system/douyin-sender.timer
 ```
 
-例如每天 **00:30**：
+例如每天 00:30：
 
 ```ini
 [Timer]
@@ -360,16 +388,7 @@ Persistent=true
 RandomizedDelaySec=0
 ```
 
-例如每天 **20:00**：
-
-```ini
-[Timer]
-OnCalendar=*-*-* 20:00:00
-Persistent=true
-RandomizedDelaySec=0
-```
-
-修改后执行：
+然后：
 
 ```bash
 sudo systemctl daemon-reload
@@ -378,95 +397,48 @@ sudo systemctl restart douyin-sender.timer
 
 ---
 
-## 15. 手动触发一次 systemd 任务
-
-可以执行：
+## 14. 手动触发和查看日志
 
 ```bash
 sudo systemctl start douyin-sender.service
-```
-
-查看结果：
-
-```bash
 sudo systemctl status douyin-sender.service
-```
-
-查看日志：
-
-```bash
 journalctl -u douyin-sender.service -n 100 --no-pager
 ```
 
-实时查看：
+实时日志：
 
 ```bash
 journalctl -u douyin-sender.service -f
 ```
 
----
-
-## 16. 查看程序诊断文件
-
-项目自己的运行日志和诊断文件位于：
+程序诊断文件：
 
 ```text
 /opt/douyin-auto-sender/artifacts/
 ```
 
-例如：
-
-```bash
-ls -lah /opt/douyin-auto-sender/artifacts
-```
-
-可能包含：
+多账号时：
 
 ```text
-run.log
-result.json
-history.json
-screenshots/
-traces/
+/opt/douyin-auto-sender/artifacts/account1/
+/opt/douyin-auto-sender/artifacts/account2/
 ```
-
-如果发送失败，可以优先查看：
-
-```bash
-cat /opt/douyin-auto-sender/artifacts/run.log
-```
-
-> 截图和日志可能包含账号或聊天相关信息，请不要随意公开。
 
 ---
 
-## 17. Cookie 失效怎么办？
+## 15. Cookie 失效
 
-如果日志提示登录失效、安全验证或 Cookie 无效：
-
-1. 在自己的电脑重新登录抖音；
-2. 使用 Cookie-Editor 重新导出 JSON；
-3. 在服务器重新编辑：
+重新在电脑登录抖音并导出对应账号 Cookie，替换服务器上的 JSON 文件，然后先执行：
 
 ```bash
-sudo nano /etc/douyin-auto-fire/cookie.json
+sudo -u douyin-sender -H /opt/douyin-auto-sender/.venv/bin/python /opt/douyin-auto-sender/run.py --dry-run
 ```
-
-4. 替换为新的 Cookie；
-5. 再执行一次 Dry Run：
-
-```bash
-cd /opt/douyin-auto-sender
-sudo -u douyin-sender -H .venv/bin/python run.py --dry-run
-```
-
-Dry Run 成功后即可继续自动运行。
 
 ---
 
-## 18. 更新项目
+## 16. 更新项目
 
-以后仓库更新后，可以执行：
+GitHub 源：
 
 ```bash
 cd /opt/douyin-auto-sender
@@ -474,51 +446,30 @@ sudo -u douyin-sender -H git pull
 sudo -u douyin-sender -H .venv/bin/pip install -r requirements.txt
 ```
 
-如果 Playwright 版本发生变化，建议同时重新执行：
+如果使用 CNB clone，`git pull` 同样即可。
+
+Playwright 版本变化后建议：
 
 ```bash
 sudo /opt/douyin-auto-sender/.venv/bin/python -m playwright install-deps chromium
 sudo -u douyin-sender -H /opt/douyin-auto-sender/.venv/bin/python -m playwright install chromium
 ```
 
-如果 `deploy/systemd/` 中的服务文件也更新了，再重新复制并执行：
-
-```bash
-sudo cp deploy/systemd/douyin-sender.service /etc/systemd/system/
-sudo cp deploy/systemd/douyin-sender.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl restart douyin-sender.timer
-```
-
 ---
 
-## 常用命令
+## 注意事项
 
-```bash
-# Dry Run，不发送消息
-sudo -u douyin-sender -H /opt/douyin-auto-sender/.venv/bin/python /opt/douyin-auto-sender/run.py --dry-run
-
-# 手动真实运行
-cd /opt/douyin-auto-sender
-sudo -u douyin-sender -H .venv/bin/python run.py
-
-# 查看定时器
-systemctl list-timers --all | grep douyin-sender
-
-# 手动运行一次 systemd 任务
-sudo systemctl start douyin-sender.service
-
-# 查看 systemd 日志
-journalctl -u douyin-sender.service -n 100 --no-pager
-
-# 查看程序日志
-cat /opt/douyin-auto-sender/artifacts/run.log
-```
+- Cookie、`.env`、`.env.account*` 和钉钉机器人密钥不要提交到公开仓库。
+- 多账号是串行执行，不会并发启动多个账号。
+- 同一个抖音账号不要同时在多个机器/任务中运行，避免重复发送。
+- 服务器网络环境可能触发抖音安全验证。
+- 日志、截图和 Trace 可能包含聊天信息，请勿随意公开。
 
 ---
 
 ## 其他部署方式
 
-- 👉 [GitHub Actions 部署](github-actions.md)
-- 👉 [Windows 电脑部署](windows.md)
-- 👉 [返回项目主页](../README.md)
+- [GitHub Actions 部署](github-actions.md)
+- [Docker 部署](docker.md)
+- [Windows 电脑部署](windows.md)
+- [返回项目主页](../README.md)

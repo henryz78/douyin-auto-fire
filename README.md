@@ -3,7 +3,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/unmev/douyin-auto-fire?style=flat-square)](https://github.com/unmev/douyin-auto-fire/stargazers)
 ![Visitors](https://visitor-badge.laobi.icu/badge?page_id=unmev.douyin-auto-fire)
 
-> 定时自动向抖音好友发送消息，保持火花不断。基于 Playwright 模拟真实浏览器操作，可使用 GitHub Actions、云服务器或 Windows 电脑定时运行。
+> 定时自动向抖音好友发送消息，保持火花不断。基于 Playwright 模拟真实浏览器操作，可使用 GitHub Actions、Docker、云服务器或 Windows 电脑定时运行。
 
 ![douyin-auto-fire-banner.svg](https://img.908988.xyz/file/教程/douyin-auto-fire/5pdab8It.svg)
 
@@ -13,13 +13,13 @@
 
 通过模拟浏览器操作，可以按照配置自动向指定好友发送文字、图片或抖音原生表情，并支持多种运行方式。
 
-如果只是想快速使用，推荐 **GitHub Actions**：不需要自己购买服务器，也不需要电脑长期保持开机。也可以部署到 Linux 云服务器，或者直接在 Windows 电脑上运行。
+如果只是想快速使用，推荐 **GitHub Actions**：不需要自己购买服务器，也不需要电脑长期保持开机。已有 Linux 服务器或 NAS 的用户推荐使用 **Docker**，也可以使用传统 Python + systemd 方式部署到云服务器，或者直接在 Windows 电脑上运行。
 
 > ⚠️ 本项目使用 Cookie / Storage State 作为登录凭证。请只保存在安全位置，不要提交到公开仓库，也不要分享给他人。
 
 ## ✨ 已实现功能
 
-- ⏰ **定时自动发送**：支持 GitHub Actions、systemd Timer 等方式定时运行
+- ⏰ **定时自动发送**：支持 GitHub Actions、Docker Cron、systemd Timer 等方式定时运行
 - 💬 **多种消息类型**：支持文字、图片（PNG/JPG/GIF/WebP）和抖音原生表情
 - 🎲 **随机消息**：支持从多条候选消息中随机选择
 - 👥 **多好友支持**：可以同时为多个好友配置发送任务
@@ -43,9 +43,25 @@
 
 包含 Cookie 获取、配置生成、GitHub Secrets、Dry Run、定时任务、多账号和失败诊断等完整图文步骤。
 
+### 🐳 [Docker 部署 →](docs/docker.md)
+
+**推荐已有 Linux 服务器、NAS、1Panel 或宝塔环境的用户使用。** 镜像已经包含 Python、Playwright 和 Chromium，只需要在宿主机保存 `config.json`、`cookie.json` 和日志目录。
+
+默认镜像：
+
+```text
+ghcr.io/unmev/douyin-auto-fire:latest
+```
+
+启动：
+
+```bash
+docker compose up -d
+```
+
 ### 🖥️ [云服务器部署 →](docs/server.md)
 
-适合有 Linux VPS / 云服务器的用户。
+适合希望使用传统 Python + systemd 方式部署的 Linux VPS / 云服务器用户。
 
 使用 Python + Playwright + Headless Chromium 运行，并通过 `systemd Timer` 每天自动执行。教程包含环境安装、Cookie 配置、Dry Run、systemd 定时、日志查看和项目更新。
 
@@ -63,11 +79,11 @@
 | --- | --- |
 | 语言 | Python 3.11+ |
 | 浏览器自动化 | [Playwright](https://playwright.dev/python/) + Chromium |
-| 定时调度 | GitHub Actions / systemd Timer / Windows 任务计划程序 |
+| 定时调度 | GitHub Actions / Docker Cron / systemd Timer / Windows 任务计划程序 |
 | 环境变量 | python-dotenv |
 | 时区 | tzdata |
 | 通知 | 钉钉机器人 Webhook |
-| 支持平台 | Windows / macOS / Linux |
+| 支持平台 | Windows / macOS / Linux / Docker |
 
 主要依赖：
 
@@ -82,7 +98,7 @@ tzdata>=2025.2
 - Cookie、Storage State 和发送配置不要直接提交到公开仓库。
 - 修改好友、消息或表情配置后，建议先运行一次 Dry Run。
 - 同一个抖音账号不要同时运行多个自动发送任务，避免重复发送。
-- GitHub-hosted Runner 或云服务器网络环境可能触发抖音安全验证。
+- GitHub-hosted Runner、Docker 主机或云服务器网络环境可能触发抖音安全验证。
 - 如果 Cookie / Storage State 失效或抖音要求验证码，需要本人重新完成登录验证。
 - 抖音网页结构发生变化时，自动化功能可能需要同步适配。
 
