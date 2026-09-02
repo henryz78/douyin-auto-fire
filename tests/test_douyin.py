@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.douyin import DouyinChat, PageOperationError
+from app.models import Message, Target
 from app.selectors import CHAT_PANEL_MARKERS, MESSAGE_INPUTS
 
 
@@ -213,8 +214,32 @@ async def test_open_target_succeeds_without_retry() -> None:
     chat._open_target_once = ok
 
     await chat.open_target("好友A", retries=1)
-
     page.wait_for_timeout.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_open_target_tries_stable_identity_before_display_name() -> None:
+    page = MagicMock()
+    chat = DouyinChat(page)
+    calls = []
+
+    async def fake_open(name: str, expected_names=None):
+        calls.append((name, expected_names))
+        if name == "sec_1":
+            raise PageOperationError("搜索不到目标好友")
+
+    chat._open_target_once = fake_open
+    target = Target(
+        name="新昵称",
+        messages=(Message(type="text", content="你好"),),
+        nickname="新昵称",
+        sec_uid="sec_1",
+    )
+
+    await chat.open_target(target, retries=0)
+
+    assert [item[0] for item in calls] == ["sec_1", "新昵称"]
+    assert all(item[1] == ("新昵称",) for item in calls)
 
 
 @pytest.mark.asyncio

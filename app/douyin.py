@@ -5,6 +5,7 @@ import re
 
 from playwright.async_api import Locator, Page
 
+from app.models import Target
 from app.selectors import CHAT_PANEL_MARKERS, MESSAGE_INPUTS, SEARCH_INPUTS
 
 
@@ -26,21 +27,28 @@ class DouyinChat:
         self.timeout_ms = timeout_ms
         self.confirm_timeout_ms = confirm_timeout_ms
 
-    async def open_target(self, name: str, retries: int = 1) -> None:
+    async def open_target(self, target: str | Target, retries: int = 1) -> None:
+        target_obj = target if isinstance(target, Target) else None
+        candidates = target_obj.search_candidates() if target_obj else (str(target),)
+        confirmation_names = target_obj.confirmation_names() if target_obj else (str(target),)
         last_error: Exception | None = None
-        for attempt in range(retries + 1):
-            try:
-                await self._open_target_once(name)
-                return
-            except Exception as exc:
-                last_error = exc
-                if attempt < retries:
-                    await self.page.wait_for_timeout(RETRY_DELAY_MS)
+        for candidate in candidates:
+            for attempt in range(retries + 1):
+                try:
+                    if target_obj:
+                        await self._open_target_once(candidate, expected_names=confirmation_names)
+                    else:
+                        await self._open_target_once(candidate)
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    if attempt < retries:
+                        await self.page.wait_for_timeout(RETRY_DELAY_MS)
         if last_error is not None:
             raise last_error
         raise PageOperationError("打开聊天失败")
 
-    async def _open_target_once(self, name: str) -> None:
+    async def _open_target_once(self, name: str, expected_names: tuple[str, ...] | None = None) -> None:
         search = await first_visible(self.page, SEARCH_INPUTS, self.timeout_ms)
         await search.click()
         await search.fill("")
@@ -51,7 +59,7 @@ class DouyinChat:
         if result is None:
             raise PageOperationError("搜索不到目标好友")
         await result.click(force=True)
-        await self._confirm_opened(name)
+        await self._confirm_opened(name, expected_names=expected_names)
 
     async def _search_result(self, name: str) -> Locator | None:
         # Search mode renders a separate SearchPanel. Its "发消息" action is the
@@ -166,18 +174,21 @@ class DouyinChat:
     async def message_input(self) -> Locator:
         return await first_visible(self.page, MESSAGE_INPUTS, self.timeout_ms)
 
-    async def _confirm_opened(self, name: str, timeout_ms: int | None = None) -> None:
+    async def _confirm_opened(self, name: str, timeout_ms: int | None = None, expected_names: tuple[str, ...] | None = None) -> None:
         timeout = timeout_ms if timeout_ms is not None else self.confirm_timeout_ms
         deadline = asyncio.get_running_loop().time() + timeout / 1000
         while True:
-            last_error = await self._chat_open_error(name)
+            if expected_names is None:
+                last_error = await self._chat_open_error(name)
+            else:
+                last_error = await self._chat_open_error(name, expected_names=expected_names)
             if last_error is None:
                 return
             if asyncio.get_running_loop().time() >= deadline:
                 raise last_error
             await self.page.wait_for_timeout(500)
 
-    async def _chat_open_error(self, name: str) -> PageOperationError | None:
+    async def _chat_open_error(self, name: str, expected_names: tuple[str, ...] | None = None) -> PageOperationError | None:
         # Confirm the right-side current chat by the authoritative chat title, which
         # must itself be visible. A visible header retaining a hidden stale name node
         # (common during SPA transitions) must not confirm the wrong recipient, and
@@ -205,8 +216,10 @@ class DouyinChat:
                         continue
                 except Exception:
                     continue
-                if await _visible_exact_or_group_text_in(header, title_selectors, name):
-                    return None
+                names = expected_names or (name,)
+                for expected in names:
+                    if await _visible_exact_or_group_text_in(header, title_selectors, expected):
+                        return None
 
         composer_visible = await self._composer_visible()
         return PageOperationError(

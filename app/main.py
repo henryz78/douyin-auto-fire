@@ -92,14 +92,15 @@ async def run(
                     opened = False
                     try:
                         LOGGER.info("处理好友: %s", alias)
-                        await chat.open_target(target.name, retries=task.target_open_retries)
+                        target_ref = target if target.search_candidates() != (target.name,) else target.name
+                        await chat.open_target(target_ref, retries=task.target_open_retries)
                         opened = True
                         if not dry_run:
                             for selected_index, (message_index, message, message_id, key) in enumerate(selected):
                                 current_key = key
                                 began = history.reserve(
                                     key,
-                                    target_key=target.name,
+                                    target_key=target.identity_key,
                                     display_name=target.name,
                                     message_id=message_id,
                                     allow_success_override=retry_mode is None and not task.prevent_duplicates,
@@ -125,7 +126,8 @@ async def run(
                             current_key=current_key,
                             category=category,
                             error=redact_text(str(exc), aliases),
-                            target_name=target.name,
+                            target_key=target.identity_key,
+                            display_name=target.name,
                             opened=opened,
                         )
                         LOGGER.exception("处理好友时登录状态失效: %s", alias)
@@ -158,7 +160,8 @@ async def run(
                             current_key=current_key,
                             category=category,
                             error=redact_text(str(exc), aliases),
-                            target_name=target.name,
+                            target_key=target.identity_key,
+                            display_name=target.name,
                             opened=opened,
                         )
                         LOGGER.exception("好友处理失败: %s", alias)
@@ -257,7 +260,7 @@ def _message_plans(history: History, task_id: str, run_date: str, target) -> lis
     plans = []
     for message_index, message in enumerate(target.messages):
         message_id = _message_id(message_index, message)
-        key = history.key(task_id, run_date, target.name, message_id)
+        key = history.key(task_id, run_date, target.identity_key, message_id)
         plans.append((message_index, message, message_id, key))
     return plans
 
@@ -291,7 +294,8 @@ def _persist_target_failure(
     current_key: str | None,
     category,
     error: str,
-    target_name: str,
+    target_key: str,
+    display_name: str,
     opened: bool,
 ) -> None:
     keys = [current_key] if current_key else ([] if opened else [plan[3] for plan in selected])
@@ -304,8 +308,8 @@ def _persist_target_failure(
             plan = plan_by_key[key]
             began = history.reserve(
                 key,
-                target_key=target_name,
-                display_name=target_name,
+                target_key=target_key,
+                display_name=display_name,
                 message_id=plan[2],
             )
             if not began:

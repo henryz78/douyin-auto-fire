@@ -162,11 +162,19 @@ def _parse_target(raw: Any, index: int, config_dir: Path) -> Target:
     label = f"targets[{index}]"
     if not isinstance(raw, dict):
         raise ConfigError(f"{label} 必须是对象")
-    name = _non_empty_string(raw.get("name"), f"{label}.name")
+    name = _non_empty_string(raw.get("name", raw.get("display_name")), f"{label}.name")
     messages_raw = raw.get("messages")
     if not isinstance(messages_raw, list) or not messages_raw:
         raise ConfigError(f"{label}.messages 必须是非空数组")
-    return Target(name=name, messages=tuple(_parse_message(item, f"{label}.messages[{i}]", config_dir) for i, item in enumerate(messages_raw)))
+    return Target(
+        name=name,
+        messages=tuple(_parse_message(item, f"{label}.messages[{i}]", config_dir) for i, item in enumerate(messages_raw)),
+        remark_name=_optional_string(raw.get("remark_name")),
+        nickname=_optional_string(raw.get("nickname")),
+        unique_id=_optional_string(raw.get("unique_id")),
+        short_id=_optional_string(raw.get("short_id")),
+        sec_uid=_optional_string(raw.get("sec_uid")),
+    )
 
 
 def _parse_message(raw: Any, label: str, config_dir: Path) -> Message:

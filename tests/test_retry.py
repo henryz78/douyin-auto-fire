@@ -47,6 +47,20 @@ def _prepare_history(settings: Settings, task: TaskConfig) -> tuple[History, str
     return history, keys[0], keys[1]
 
 
+def test_message_plan_uses_stable_identity_key(tmp_path) -> None:
+    history = History(tmp_path / "history.json")
+    target = Target(
+        name="新昵称",
+        sec_uid="sec_1",
+        messages=(Message(type="text", content="你好"),),
+    )
+
+    plans = main_module._message_plans(history, "task", "2026-09-02", target)
+
+    assert ":sec_1:" in plans[0][3]
+    assert ":新昵称:" not in plans[0][3]
+
+
 def _mock_runtime(monkeypatch, settings, task):
     page = MagicMock()
     session = SimpleNamespace(page=page, context=MagicMock())

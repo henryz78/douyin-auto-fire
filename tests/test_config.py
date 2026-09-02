@@ -199,6 +199,45 @@ def test_defaults_target_open_retries_and_timeout(tmp_path: Path) -> None:
     assert task.target_open_timeout_seconds == 15.0
 
 
+def test_loads_optional_stable_target_identity_fields(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        {
+            "targets": [
+                {
+                    "display_name": "当前显示名",
+                    "remark_name": "备注名",
+                    "nickname": "昵称",
+                    "unique_id": "unique_1",
+                    "short_id": "12345",
+                    "sec_uid": "sec_1",
+                    "messages": [{"type": "text", "content": "你好"}],
+                }
+            ]
+        },
+    )
+
+    target = load_task(settings_for(path)).targets[0]
+
+    assert target.name == "当前显示名"
+    assert target.identity_key == "sec_1"
+    assert target.search_candidates() == ("sec_1", "unique_1", "12345", "备注名", "昵称", "当前显示名")
+    assert target.confirmation_names() == ("备注名", "昵称", "当前显示名")
+
+
+def test_legacy_name_only_target_identity_is_unchanged(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        {"targets": [{"name": "好友A", "messages": [{"type": "text", "content": "你好"}]}]},
+    )
+
+    target = load_task(settings_for(path)).targets[0]
+
+    assert target.identity_key == "好友A"
+    assert target.search_candidates() == ("好友A",)
+    assert target.confirmation_names() == ("好友A",)
+
+
 def test_rejects_negative_target_open_retries(tmp_path: Path) -> None:
     path = write_config(
         tmp_path,

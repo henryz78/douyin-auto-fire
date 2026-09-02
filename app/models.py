@@ -50,6 +50,27 @@ class Message:
 class Target:
     name: str
     messages: tuple[Message, ...]
+    remark_name: str | None = None
+    nickname: str | None = None
+    unique_id: str | None = None
+    short_id: str | None = None
+    sec_uid: str | None = None
+
+    @property
+    def display_name(self) -> str:
+        return self.name
+
+    @property
+    def identity_key(self) -> str:
+        return self.sec_uid or self.unique_id or self.short_id or self.name
+
+    def search_candidates(self) -> tuple[str, ...]:
+        values = (self.sec_uid, self.unique_id, self.short_id, self.remark_name, self.nickname, self.name)
+        return tuple(dict.fromkeys(value.strip() for value in values if isinstance(value, str) and value.strip()))
+
+    def confirmation_names(self) -> tuple[str, ...]:
+        values = (self.remark_name, self.nickname, self.name)
+        return tuple(dict.fromkeys(value.strip() for value in values if isinstance(value, str) and value.strip()))
 
 
 @dataclass(frozen=True)
