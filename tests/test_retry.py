@@ -61,6 +61,27 @@ def test_message_plan_uses_stable_identity_key(tmp_path) -> None:
     assert ":新昵称:" not in plans[0][3]
 
 
+def test_stable_identity_honors_legacy_name_keyed_success(tmp_path) -> None:
+    history = History(tmp_path / "history.json")
+    target = Target(
+        name="好友A",
+        sec_uid="sec_1",
+        messages=(Message(type="text", content="你好"),),
+    )
+    message_id = main_module._message_id(0, target.messages[0])
+    legacy_key = history.key("task", "2026-09-02", target.name, message_id)
+    history.reserve(legacy_key)
+    history.mark_success(legacy_key)
+    plans = main_module._message_plans(history, "task", "2026-09-02", target)
+
+    selected, duplicates = main_module._exclude_legacy_successes(
+        history, "task", "2026-09-02", target, plans
+    )
+
+    assert selected == []
+    assert duplicates == 1
+
+
 def _mock_runtime(monkeypatch, settings, task):
     page = MagicMock()
     session = SimpleNamespace(page=page, context=MagicMock())

@@ -100,6 +100,14 @@ async def run(
                         prevent_duplicates=task.prevent_duplicates,
                         retry_mode=retry_mode,
                     )
+                    selected, legacy_duplicates = _exclude_legacy_successes(
+                        history,
+                        task.task_id,
+                        run_date,
+                        target,
+                        selected,
+                    )
+                    duplicate_count += legacy_duplicates
                     if not dry_run and not selected:
                         status = "duplicate" if duplicate_count else "skipped"
                         results.append(TargetResult(target=target.name, status=status, target_alias=alias, identity=target.identity_key))
@@ -340,6 +348,32 @@ def _select_message_plans(
         return plans, 0
     selected = [plan for plan in plans if not history.contains(plan[3])]
     return selected, len(plans) - len(selected)
+
+
+def _exclude_legacy_successes(
+    history: History,
+    task_id: str,
+    run_date: str,
+    target,
+    plans: list[tuple[int, object, str, str]],
+) -> tuple[list[tuple[int, object, str, str]], int]:
+    """Honor name-keyed successes written before stable identity was added.
+
+    This is deliberately a one-way safety check: legacy success is treated as
+    authoritative, while old failures are not guessed or migrated.
+    """
+    if target.identity_key == target.name:
+        return plans, 0
+    selected = []
+    duplicates = 0
+    for plan in plans:
+        legacy_key = history.key(task_id, run_date, target.name, plan[2])
+        entry = history.entry(legacy_key)
+        if isinstance(entry, dict) and entry.get("status") == "success":
+            duplicates += 1
+            continue
+        selected.append(plan)
+    return selected, duplicates
 
 
 def _persist_target_failure(
