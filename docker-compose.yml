@@ -1,6 +1,6 @@
 services:
   douyin-auto-fire:
-    image: docker.cnb.cool/1mev/douyin-auto-fire:latest
+    image: ghcr.io/unmev/douyin-auto-fire:latest
     container_name: douyin-auto-fire
     restart: unless-stopped
     environment:

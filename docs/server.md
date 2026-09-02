@@ -51,14 +51,6 @@ sudo chown -R douyin-sender:douyin-sender /opt/douyin-auto-sender
 cd /opt/douyin-auto-sender
 ```
 
-国内服务器如果访问 GitHub 较慢，也可以使用 CNB 国内同步仓库：
-
-```bash
-sudo git clone https://cnb.cool/1mev/douyin-auto-fire.git /opt/douyin-auto-sender
-```
-
-GitHub 仍然是主仓库，CNB 用于国内加速。
-
 ---
 
 ## 5. 创建虚拟环境并安装依赖
@@ -445,8 +437,6 @@ cd /opt/douyin-auto-sender
 sudo -u douyin-sender -H git pull
 sudo -u douyin-sender -H .venv/bin/pip install -r requirements.txt
 ```
-
-如果使用 CNB clone，`git pull` 同样即可。
 
 Playwright 版本变化后建议：
 
