@@ -100,6 +100,53 @@ async def test_opens_chat_directly_before_checking_login() -> None:
     page.goto.assert_awaited_once_with(DOUYIN_CHAT_URL, wait_until="domcontentloaded", timeout=45_000)
 
 
+@pytest.mark.asyncio
+async def test_chat_navigation_retries_transient_network_error() -> None:
+    page = MagicMock()
+    page.goto = AsyncMock(
+        side_effect=[
+            RuntimeError("Page.goto: net::ERR_TIMED_OUT at https://www.douyin.com/chat"),
+            RuntimeError("Page.goto: net::ERR_CONNECTION_RESET at https://www.douyin.com/chat"),
+            None,
+        ]
+    )
+    page.wait_for_timeout = AsyncMock()
+
+    with patch("app.browser._any_visible", new=AsyncMock(side_effect=[False, False])):
+        with patch("app.browser._first_visible_selector", new=AsyncMock(return_value='input[placeholder*="搜索"]')):
+            await open_private_messages(page)
+
+    assert page.goto.await_count == 3
+    page.wait_for_timeout.assert_any_await(2_000)
+    page.wait_for_timeout.assert_any_await(3_000)
+
+
+@pytest.mark.asyncio
+async def test_chat_navigation_does_not_retry_non_transient_error() -> None:
+    page = MagicMock()
+    page.goto = AsyncMock(side_effect=RuntimeError("Page.goto: unexpected browser failure"))
+    page.wait_for_timeout = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="unexpected browser failure"):
+        await open_private_messages(page)
+
+    page.goto.assert_awaited_once_with(DOUYIN_CHAT_URL, wait_until="domcontentloaded", timeout=45_000)
+    page.wait_for_timeout.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_chat_navigation_raises_after_transient_retries_exhausted() -> None:
+    page = MagicMock()
+    page.goto = AsyncMock(side_effect=RuntimeError("Page.goto: net::ERR_TIMED_OUT at https://www.douyin.com/chat"))
+    page.wait_for_timeout = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="ERR_TIMED_OUT"):
+        await open_private_messages(page)
+
+    assert page.goto.await_count == 3
+    assert page.wait_for_timeout.await_count == 2
+
+
 def test_safe_url_strips_query_and_fragment() -> None:
     assert _safe_url("https://www.douyin.com/chat?token=SECRET&x=1#frag") == "https://www.douyin.com/chat"
     assert _safe_url("https://www.douyin.com/chat") == "https://www.douyin.com/chat"

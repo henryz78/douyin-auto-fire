@@ -8,7 +8,15 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit, urlunsplit
 
-from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
+from playwright.async_api import (
+    Browser,
+    BrowserContext,
+    Error as PlaywrightError,
+    Page,
+    Playwright,
+    TimeoutError as PlaywrightTimeoutError,
+    async_playwright,
+)
 
 from app.config import ConfigError, parse_auth_json
 from app.models import Settings
@@ -40,6 +48,25 @@ class SearchBoxNotReadyError(RuntimeError):
 # 单轮等待窗口。这里做有限次数重试，并在需要时 reload，避免把慢渲染误判为认证失效。
 SEARCH_BOX_RETRIES = 3
 _SEARCH_RETRY_DELAY_MS = 1_500
+
+# A runner or fixed proxy can intermittently fail while opening the chat SPA.
+# Keep this separate from search-box retries: a navigation failure means the
+# page never became usable, so retry the navigation itself before giving up.
+CHAT_NAVIGATION_RETRIES = 3
+_CHAT_NAVIGATION_RETRY_DELAY_MS = 2_000
+_TRANSIENT_NAVIGATION_ERRORS = (
+    "ERR_CONNECTION_CLOSED",
+    "ERR_CONNECTION_RESET",
+    "ERR_CONNECTION_REFUSED",
+    "ERR_CONNECTION_ABORTED",
+    "ERR_NETWORK_CHANGED",
+    "ERR_NETWORK_ACCESS_DENIED",
+    "ERR_PROXY_CONNECTION_FAILED",
+    "ERR_TUNNEL_CONNECTION_FAILED",
+    "ERR_TIMED_OUT",
+    "ERR_INTERNET_DISCONNECTED",
+    "ERR_NAME_NOT_RESOLVED",
+)
 
 
 # Collects only safe, whitelisted attributes. It deliberately reads no
@@ -121,7 +148,7 @@ async def verify_login(page: Page, timeout_ms: int = 15_000) -> None:
 
 
 async def open_private_messages(page: Page, timeout_ms: int = 15_000) -> None:
-    await page.goto(DOUYIN_CHAT_URL, wait_until="domcontentloaded", timeout=45_000)
+    await _goto_chat_with_retries(page)
     # 1. Explicit risk-control page takes priority, independently of login state.
     if await _any_visible(page, RISK_MARKERS, timeout_ms=2_000):
         raise RiskControlError("抖音私信页面要求进行安全验证，任务已停止")
@@ -155,7 +182,7 @@ async def open_private_messages(page: Page, timeout_ms: int = 15_000) -> None:
                     await page.reload(wait_until="domcontentloaded", timeout=45_000)
                 except Exception:
                     LOGGER.exception("reload 失败，改为重新访问私信页面")
-                    await page.goto(DOUYIN_CHAT_URL, wait_until="domcontentloaded", timeout=45_000)
+                    await _goto_chat_with_retries(page)
             else:
                 await page.wait_for_timeout(_SEARCH_RETRY_DELAY_MS)
 
@@ -166,6 +193,54 @@ async def open_private_messages(page: Page, timeout_ms: int = 15_000) -> None:
     diagnostic = await _collect_safe_diagnostic(page, LOGIN_REQUIRED_MARKERS, RISK_MARKERS)
     LOGGER.error("多次重试后仍未检测到好友搜索框，页面安全诊断:\n%s", diagnostic)
     raise SearchBoxNotReadyError(f"私信页面已打开，但搜索框在 {SEARCH_BOX_RETRIES} 次重试后仍未就绪")
+
+
+async def _goto_chat_with_retries(page: Page) -> None:
+    """Open the chat page, retrying only recoverable navigation failures."""
+    last_error: Exception | None = None
+    for attempt in range(1, CHAT_NAVIGATION_RETRIES + 1):
+        try:
+            await page.goto(DOUYIN_CHAT_URL, wait_until="domcontentloaded", timeout=45_000)
+            if attempt > 1:
+                LOGGER.info("抖音私信页面导航重试成功，第 %d/%d 次尝试", attempt, CHAT_NAVIGATION_RETRIES)
+            return
+        except Exception as exc:
+            last_error = exc
+            recoverable = _is_transient_navigation_error(exc)
+            if not recoverable or attempt >= CHAT_NAVIGATION_RETRIES:
+                raise
+            LOGGER.warning(
+                "打开抖音私信页面遇到临时网络错误，第 %d/%d 次尝试失败，%d 秒后重试: %s",
+                attempt,
+                CHAT_NAVIGATION_RETRIES,
+                _CHAT_NAVIGATION_RETRY_DELAY_MS // 1_000,
+                _safe_exception_message(exc),
+            )
+            await page.wait_for_timeout(_CHAT_NAVIGATION_RETRY_DELAY_MS)
+
+    # The loop either returns or raises. Keep a defensive guard for static
+    # type checkers and to avoid hiding an unexpected future change.
+    if last_error is not None:
+        raise last_error
+
+
+def _is_transient_navigation_error(exc: Exception) -> bool:
+    if isinstance(exc, PlaywrightTimeoutError):
+        return True
+    if not isinstance(exc, PlaywrightError):
+        # Mocks and wrappers may expose the Playwright error text through a
+        # generic exception, so inspect its message too, but do not retry
+        # arbitrary application errors.
+        message = str(exc).upper()
+    else:
+        message = str(exc).upper()
+    return any(marker in message for marker in _TRANSIENT_NAVIGATION_ERRORS)
+
+
+def _safe_exception_message(exc: Exception) -> str:
+    """Keep retry logs useful without echoing potentially sensitive URLs."""
+    message = str(exc)
+    return message.split(" at ", 1)[0][:200]
 
 
 async def save_trace(session: BrowserSession, path: Path) -> None:
