@@ -6,6 +6,7 @@ import pytest
 
 from app.browser import (
     AuthenticationError,
+    RateLimitedError,
     RiskControlError,
     SearchBoxNotReadyError,
     _collect_safe_diagnostic,
@@ -13,6 +14,7 @@ from app.browser import (
     _safe_url,
     open_douyin,
     open_private_messages,
+    verify_login,
 )
 from app.config import ConfigError
 from app.models import ProxySettings, Settings
@@ -293,6 +295,14 @@ async def test_login_required_still_raises_before_search_check() -> None:
     with patch("app.browser._any_visible", new=AsyncMock(side_effect=[False, True])):
         with pytest.raises(AuthenticationError, match="登录状态失效"):
             await open_private_messages(page)
+
+
+@pytest.mark.asyncio
+async def test_verify_login_detects_rate_limit() -> None:
+    page = MagicMock()
+    with patch("app.browser._any_visible", new=AsyncMock(side_effect=[True])):
+        with pytest.raises(RateLimitedError, match="冷却"):
+            await verify_login(page)
 
 
 def test_normalizes_cookie_editor_export() -> None:

@@ -24,6 +24,7 @@ from app.selectors import (
     DOUYIN_CHAT_URL,
     LOGIN_MARKERS,
     LOGIN_REQUIRED_MARKERS,
+    RATE_LIMIT_MARKERS,
     RISK_MARKERS,
     SEARCH_INPUTS,
 )
@@ -37,6 +38,10 @@ class AuthenticationError(RuntimeError):
 
 
 class RiskControlError(RuntimeError):
+    pass
+
+
+class RateLimitedError(RuntimeError):
     pass
 
 
@@ -139,6 +144,8 @@ async def open_douyin(settings: Settings) -> AsyncIterator[BrowserSession]:
 
 
 async def verify_login(page: Page, timeout_ms: int = 15_000) -> None:
+    if await _any_visible(page, RATE_LIMIT_MARKERS, timeout_ms=2_000):
+        raise RateLimitedError("抖音提示操作过于频繁，账号已进入冷却状态")
     if await _any_visible(page, RISK_MARKERS, timeout_ms=2_000):
         raise RiskControlError("抖音要求进行安全验证，任务已停止")
     if await _any_visible(page, LOGIN_REQUIRED_MARKERS, timeout_ms=2_000):
@@ -149,7 +156,7 @@ async def verify_login(page: Page, timeout_ms: int = 15_000) -> None:
 
 async def open_private_messages(page: Page, timeout_ms: int = 15_000) -> None:
     await _goto_chat_with_retries(page)
-    # 1. Explicit risk-control page takes priority, independently of login state.
+    # Explicit risk-control page takes priority, independently of login state.
     if await _any_visible(page, RISK_MARKERS, timeout_ms=2_000):
         raise RiskControlError("抖音私信页面要求进行安全验证，任务已停止")
     # 2. An explicit login page is the only signal that lets us attribute to

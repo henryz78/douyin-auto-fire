@@ -16,6 +16,11 @@ RISK_MARKERS = (
     'text=完成验证',
     'text=验证身份',
 )
+RATE_LIMIT_MARKERS = (
+    'text="操作太频繁"',
+    'text="发送过于频繁"',
+    'text="请求过于频繁"',
+)
 SEARCH_INPUTS = (
     'input[placeholder*="搜索"]',
     'input[placeholder="搜索"]',  # 精确匹配备用 selector，兼容慢渲染时属性值变化

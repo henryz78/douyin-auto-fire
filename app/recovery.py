@@ -57,6 +57,9 @@ def classify_failure(exc: Exception, *, stage: str) -> FailureCategory:
         return "risk_control"
     if name == "RateLimitedError":
         return "rate_limited"
+    explicit_category = getattr(exc, "failure_category", None)
+    if explicit_category in RETRY_POLICIES:
+        return explicit_category
     if name == "SearchBoxNotReadyError":
         return "selector_not_ready"
     if stage == "browser_startup":

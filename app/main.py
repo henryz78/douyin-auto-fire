@@ -12,14 +12,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from app.browser import AuthenticationError, RiskControlError, SearchBoxNotReadyError, open_douyin, open_private_messages, save_trace, verify_login
+from app.account_state import AccountCooldownError, AccountState
+from app.browser import AuthenticationError, RateLimitedError, RiskControlError, SearchBoxNotReadyError, open_douyin, open_private_messages, save_trace, verify_login
 from app.config import ConfigError, load_settings, load_task
 from app.douyin import DouyinChat
 from app.history import AlreadyRunningError, History, run_lock
 from app.models import Settings, TargetResult
 from app.notifier import send_dingtalk_notification, send_telegram_notification
 from app.privacy import RedactingFormatter, build_target_aliases, redact_text, target_alias
-from app.recovery import classify_failure, manual_retry_allowed
+from app.recovery import classify_failure, manual_retry_allowed, retry_policy
 from app.sender import send_message
 
 
@@ -44,19 +45,29 @@ async def run(
         raise ConfigError("必须配置 DOUYIN_STORAGE_STATE 或 DOUYIN_COOKIE")
 
     history = History(settings.artifacts_dir / "history.json")
+    account_state = AccountState(
+        settings.artifacts_dir / "account-state.json",
+        settings.account_id or "default",
+    )
     run_date = history.run_date(task.timezone)
     if retry_mode == "unconfirmed":
         LOGGER.warning("显式重试未确认消息：这些消息可能已经发送，存在重复发送风险")
     results: list[TargetResult] = []
     screenshots: list[Path] = []
     fatal_error: Exception | None = None
+    account_failure_category = None
     try:
+        account_state.ensure_runnable()
         async with open_douyin(settings) as session:
             page = session.page
             trace_saved = False
             try:
                 await open_private_messages(page)
             except Exception as exc:
+                category = classify_failure(exc, stage="navigation")
+                if retry_policy(category).abort_account:
+                    account_state.mark_failure(category)
+                    account_failure_category = category
                 LOGGER.exception("打开抖音私信页面失败")
                 screenshot = await _screenshot(page, settings.artifacts_dir, "login")
                 if screenshot:
@@ -67,8 +78,8 @@ async def run(
                         trace_saved = True
                     except Exception:
                         LOGGER.exception("保存 trace 失败")
-                label = "登录检查" if isinstance(exc, (AuthenticationError, RiskControlError)) else "运行检查"
-                results.append(TargetResult(target=label, status="failed", error=str(exc)))
+                label = "登录检查" if isinstance(exc, (AuthenticationError, RiskControlError, RateLimitedError)) else "运行检查"
+                results.append(TargetResult(target=label, status="failed", error=str(exc), failure_category=category))
                 fatal_error = exc
 
             if fatal_error is None:
@@ -118,7 +129,7 @@ async def run(
                                     await asyncio.sleep(random.uniform(task.interval_min, task.interval_max))
                         status = "success" if sent or dry_run else "duplicate"
                         results.append(TargetResult(target=target.name, status=status, sent=sent, target_alias=alias))
-                    except (AuthenticationError, RiskControlError) as exc:
+                    except (AuthenticationError, RiskControlError, RateLimitedError) as exc:
                         category = classify_failure(exc, stage="send" if opened else "target_open")
                         _persist_target_failure(
                             history,
@@ -130,7 +141,9 @@ async def run(
                             display_name=target.name,
                             opened=opened,
                         )
-                        LOGGER.exception("处理好友时登录状态失效: %s", alias)
+                        account_state.mark_failure(category)
+                        account_failure_category = category
+                        LOGGER.exception("处理好友时发生账号级故障: %s", alias)
                         screenshot = await _screenshot(page, settings.artifacts_dir, alias)
                         if screenshot:
                             screenshots.append(screenshot)
@@ -154,6 +167,8 @@ async def run(
                         break
                     except Exception as exc:
                         category = classify_failure(exc, stage="send" if opened else "target_open")
+                        if current_key is not None and category in {"transient_network", "navigation_timeout", "non_retryable"}:
+                            category = "send_unconfirmed"
                         _persist_target_failure(
                             history,
                             selected,
@@ -185,7 +200,12 @@ async def run(
                                 failure_category=category,
                             )
                         )
-                        if not task.continue_on_error:
+                        if retry_policy(category).abort_account:
+                            account_state.mark_failure(category)
+                            account_failure_category = category
+                            fatal_error = exc
+                            break
+                        if not task.continue_on_error and category not in {"friend_not_found", "send_unconfirmed"}:
                             break
                     if index < len(task.targets) - 1 and not dry_run:
                         await asyncio.sleep(random.uniform(task.interval_min, task.interval_max))
@@ -200,8 +220,15 @@ async def run(
                         results.append(TargetResult(target="运行收尾", status="failed", error=str(exc)))
     except Exception as exc:
         if fatal_error is None:
+            category = classify_failure(exc, stage="browser_startup")
+            if retry_policy(category).abort_account:
+                account_state.mark_failure(category)
+                account_failure_category = category
             fatal_error = exc
-            results.append(TargetResult(target="运行检查", status="failed", error=str(exc)))
+            results.append(TargetResult(target="运行检查", status="failed", error=str(exc), failure_category=category))
+
+    if account_failure_category is None:
+        account_state.mark_ready()
 
     _write_results(settings.artifacts_dir, task.task_id, dry_run, results, aliases)
     await _notify_dingtalk(settings, task.task_id, dry_run, results, screenshots)
@@ -226,7 +253,7 @@ def main() -> int:
                     retry_mode=_retry_mode(args),
                 )
             )
-    except (ConfigError, AuthenticationError, RiskControlError, SearchBoxNotReadyError, AlreadyRunningError) as exc:
+    except (ConfigError, AuthenticationError, RiskControlError, RateLimitedError, AccountCooldownError, SearchBoxNotReadyError, AlreadyRunningError) as exc:
         print(f"错误: {exc}")
         return 2
     except KeyboardInterrupt:
@@ -298,6 +325,8 @@ def _persist_target_failure(
     display_name: str,
     opened: bool,
 ) -> None:
+    if retry_policy(category).abort_account and current_key is None:
+        return
     keys = [current_key] if current_key else ([] if opened else [plan[3] for plan in selected])
     plan_by_key = {plan[3]: plan for plan in selected}
     for key in keys:
