@@ -62,7 +62,7 @@ def run_all_accounts() -> int:
             ):
                 settings = load_settings(None)
                 _configure_logging(settings.artifacts_dir, label=account.id, reset=True)
-                with run_lock(settings.artifacts_dir / "run.lock"):
+                with run_lock(settings.artifacts_dir / "run.lock", account_id=account.id):
                     kwargs = {"dry_run": args.dry_run}
                     if getattr(args, "retry_failed", False):
                         kwargs["retry_mode"] = "failed"

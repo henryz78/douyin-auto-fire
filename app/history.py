@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -204,18 +205,158 @@ def _now() -> str:
 
 
 @contextmanager
-def run_lock(path: Path) -> Iterator[None]:
+def run_lock(
+    path: Path,
+    *,
+    run_id: str | None = None,
+    account_id: str | None = None,
+) -> Iterator[dict]:
     path.parent.mkdir(parents=True, exist_ok=True)
+    owner = {
+        "schema_version": 1,
+        "pid": os.getpid(),
+        "process_started_at": _process_identity(os.getpid())[1],
+        "started_at": _now(),
+        "run_id": run_id or uuid.uuid4().hex,
+        "account_id": account_id,
+    }
+    descriptor = _create_lock(path, owner)
     try:
-        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as exc:
-        raise AlreadyRunningError(f"已有任务正在运行；如确认没有进程，请删除 {path}") from exc
-    try:
-        os.write(descriptor, str(os.getpid()).encode("ascii"))
-        os.close(descriptor)
-        yield
+        yield dict(owner)
     finally:
+        os.close(descriptor)
+        _remove_owned_lock(path, owner["run_id"])
+
+
+def _create_lock(path: Path, owner: dict) -> int:
+    while True:
+        try:
+            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as exc:
+            if not _existing_lock_is_stale(path):
+                raise AlreadyRunningError(f"已有任务正在运行，锁文件: {path}") from exc
+            _remove_confirmed_stale_lock(path)
+            continue
+        try:
+            payload = json.dumps(owner, ensure_ascii=False, indent=2).encode("utf-8")
+            os.write(descriptor, payload)
+            os.fsync(descriptor)
+            return descriptor
+        except Exception:
+            os.close(descriptor)
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
+
+def _existing_lock_is_stale(path: Path) -> bool:
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise AlreadyRunningError(f"无法安全读取现有锁，拒绝并发运行: {path}") from exc
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        # Compatibility with the legacy lock format that contained only a PID.
+        try:
+            pid = int(raw)
+        except ValueError as exc:
+            raise AlreadyRunningError(f"锁文件损坏，无法可靠判断是否失效: {path}") from exc
+        stored_identity = None
+    else:
+        if not isinstance(value, dict) or not isinstance(value.get("pid"), int):
+            raise AlreadyRunningError(f"锁文件损坏，无法可靠判断是否失效: {path}")
+        pid = value["pid"]
+        stored_identity = value.get("process_started_at")
+
+    alive, current_identity = _process_identity(pid)
+    if alive is False:
+        return True
+    if alive is None:
+        raise AlreadyRunningError(f"无法可靠判断锁持有进程是否存在: pid={pid}")
+    if stored_identity is not None and current_identity is not None and stored_identity != current_identity:
+        # The PID is alive but belongs to another process, so the original lock
+        # owner has exited and the PID has been reused.
+        return True
+    return False
+
+
+def _remove_confirmed_stale_lock(path: Path) -> None:
+    # Re-evaluate immediately before deletion. If another process replaced the
+    # lock, the second check will fail closed instead of deleting its live lock.
+    if not _existing_lock_is_stale(path):
+        raise AlreadyRunningError(f"锁状态在恢复期间发生变化，拒绝并发运行: {path}")
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _remove_owned_lock(path: Path, run_id: str) -> None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return
+    if isinstance(value, dict) and value.get("run_id") == run_id:
         try:
             path.unlink()
         except FileNotFoundError:
             pass
+
+
+def _process_identity(pid: int) -> tuple[bool | None, str | None]:
+    if pid <= 0:
+        return False, None
+    if os.name == "nt":
+        return _windows_process_identity(pid)
+    proc_stat = Path(f"/proc/{pid}/stat")
+    try:
+        stat = proc_stat.read_text(encoding="ascii")
+    except FileNotFoundError:
+        return False, None
+    except OSError:
+        stat = None
+    if stat:
+        fields = stat.rsplit(")", 1)[-1].split()
+        if len(fields) >= 20:
+            return True, fields[19]
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False, None
+    except PermissionError:
+        return None, None
+    except OSError:
+        return None, None
+    return True, None
+
+
+def _windows_process_identity(pid: int) -> tuple[bool | None, str | None]:
+    import ctypes
+    from ctypes import wintypes
+
+    process = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+    if not process:
+        error = ctypes.windll.kernel32.GetLastError()
+        if error in {87, 1168}:
+            return False, None
+        return None, None
+    creation = wintypes.FILETIME()
+    exit_time = wintypes.FILETIME()
+    kernel = wintypes.FILETIME()
+    user = wintypes.FILETIME()
+    try:
+        if not ctypes.windll.kernel32.GetProcessTimes(
+            process,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            return None, None
+        token = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+        return True, str(token)
+    finally:
+        ctypes.windll.kernel32.CloseHandle(process)

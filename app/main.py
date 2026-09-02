@@ -270,7 +270,7 @@ def main() -> int:
     args = _parse_cli_args()
     try:
         settings = load_settings(args.env_file)
-        with run_lock(settings.artifacts_dir / "run.lock"):
+        with run_lock(settings.artifacts_dir / "run.lock", account_id=settings.account_id):
             return asyncio.run(
                 run(
                     dry_run=args.dry_run,

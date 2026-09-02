@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import app.history as history_module
 from app.history import HISTORY_SCHEMA_VERSION, AlreadyRunningError, History, run_lock
 
 
@@ -95,3 +96,60 @@ def test_run_lock_rejects_second_process(tmp_path: Path) -> None:
                 pass
 
     assert not path.exists()
+
+
+def test_run_lock_contains_auditable_owner_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "run.lock"
+
+    with run_lock(path, run_id="run-1", account_id="account1") as owner:
+        payload = __import__("json").loads(path.read_text(encoding="utf-8"))
+        assert payload["pid"] == __import__("os").getpid()
+        assert payload["run_id"] == "run-1"
+        assert payload["account_id"] == "account1"
+        assert payload["started_at"]
+        assert owner == payload
+
+    assert not path.exists()
+
+
+def test_run_lock_recovers_confirmed_dead_pid(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "run.lock"
+    path.write_text('{"pid": 999999, "process_started_at": "old", "run_id": "old"}', encoding="utf-8")
+    original = history_module._process_identity
+    monkeypatch.setattr(
+        history_module,
+        "_process_identity",
+        lambda pid: (False, None) if pid == 999999 else original(pid),
+    )
+
+    with run_lock(path, run_id="new"):
+        assert __import__("json").loads(path.read_text(encoding="utf-8"))["run_id"] == "new"
+
+
+def test_run_lock_recovers_pid_reuse(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "run.lock"
+    path.write_text('{"pid": 123, "process_started_at": "old", "run_id": "old"}', encoding="utf-8")
+    original = history_module._process_identity
+    monkeypatch.setattr(
+        history_module,
+        "_process_identity",
+        lambda pid: (True, "new-process") if pid == 123 else original(pid),
+    )
+
+    with run_lock(path, run_id="new"):
+        assert __import__("json").loads(path.read_text(encoding="utf-8"))["run_id"] == "new"
+
+
+def test_run_lock_corrupt_or_unverifiable_lock_fails_closed(monkeypatch, tmp_path: Path) -> None:
+    corrupt = tmp_path / "corrupt.lock"
+    corrupt.write_text("broken", encoding="utf-8")
+    with pytest.raises(AlreadyRunningError, match="损坏"):
+        with run_lock(corrupt):
+            pass
+
+    unknown = tmp_path / "unknown.lock"
+    unknown.write_text("123", encoding="utf-8")
+    monkeypatch.setattr(history_module, "_process_identity", lambda _pid: (None, None))
+    with pytest.raises(AlreadyRunningError, match="无法可靠判断"):
+        with run_lock(unknown):
+            pass
