@@ -159,6 +159,8 @@ async def open_private_messages(page: Page, timeout_ms: int = 15_000) -> None:
     # Explicit risk-control page takes priority, independently of login state.
     if await _any_visible(page, RISK_MARKERS, timeout_ms=2_000):
         raise RiskControlError("抖音私信页面要求进行安全验证，任务已停止")
+    if await _any_visible(page, RATE_LIMIT_MARKERS, timeout_ms=2_000):
+        raise RateLimitedError("抖音提示操作过于频繁，账号已进入冷却状态")
     # 2. An explicit login page is the only signal that lets us attribute to
     #    expired credentials. Marker absence does not imply the credentials are
     #    valid, so search-box detection (steps 3/4) is kept separate.
@@ -179,6 +181,8 @@ async def open_private_messages(page: Page, timeout_ms: int = 15_000) -> None:
         # appeared during the wait, so re-check before deciding to retry.
         if await _any_visible(page, RISK_MARKERS, timeout_ms=2_000):
             raise RiskControlError("抖音私信页面要求进行安全验证，任务已停止")
+        if await _any_visible(page, RATE_LIMIT_MARKERS, timeout_ms=2_000):
+            raise RateLimitedError("抖音提示操作过于频繁，账号已进入冷却状态")
         if await _any_visible(page, LOGIN_REQUIRED_MARKERS, timeout_ms=2_000):
             raise AuthenticationError("进入抖音私信页面后登录状态失效")
         if attempt < SEARCH_BOX_RETRIES:

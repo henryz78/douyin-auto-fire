@@ -125,3 +125,4 @@ class TargetResult:
     last_attempt_at: str | None = None
     retryable: bool = False
     artifacts: tuple[str, ...] = ()
+    identity: str | None = None

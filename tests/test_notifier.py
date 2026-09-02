@@ -54,7 +54,7 @@ def test_markdown_lists_successes_failures_and_screenshots(monkeypatch) -> None:
         finished_at=datetime(2026, 8, 9, 8, 0, tzinfo=timezone.utc),
     )
 
-    assert title == "抖音自动发送：存在失败"
+    assert title == "抖音自动发送：部分成功"
     assert "完成时间**：2026-08-09 16:00:00 +0800" in markdown
     assert "成功名单（1）" in markdown
     assert "**好友A** - 已发送 2 条" in markdown
@@ -115,14 +115,38 @@ def test_telegram_message_lists_successes_failures_and_account() -> None:
         finished_at=datetime(2026, 8, 9, 8, 0, tzinfo=timezone.utc),
     )
 
-    assert "❌ 抖音任务存在失败" in message
+    assert "⚠️ 抖音任务部分成功" in message
     assert "任务：daily-streak" in message
     assert "账号：account1" in message
     assert "模式：正式运行" in message
     assert "成功好友（1）：" in message
     assert "- 好友A（已发送 2 条）" in message
-    assert "失败好友（1）：" in message
+    assert "失败目标（1）：" in message
     assert "- 好友B（已发送 1 条）：发送失败 请重试" in message
+
+
+def test_notifications_distinguish_unconfirmed_account_failure_and_recovery() -> None:
+    unconfirmed = build_telegram_message(
+        "task",
+        False,
+        [TargetResult(target="好友A", status="unconfirmed", failure_category="send_unconfirmed")],
+    )
+    account_failure = build_telegram_message(
+        "task",
+        False,
+        [TargetResult(target="账号检查", status="failed", failure_category="rate_limited")],
+    )
+    recovered = build_telegram_message(
+        "task",
+        False,
+        [TargetResult(target="好友A", status="success", sent=1)],
+        retry_mode="failed",
+    )
+
+    assert "未确认发送" in unconfirmed
+    assert "不会自动重发" in unconfirmed
+    assert "账号级故障" in account_failure
+    assert "重试后恢复成功" in recovered
 
 
 def test_telegram_dry_run_message_uses_verification_detail() -> None:

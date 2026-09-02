@@ -28,8 +28,9 @@ async def send_dingtalk_notification(
     dry_run: bool,
     results: list[TargetResult],
     screenshots: list[Path],
+    retry_mode: str | None = None,
 ) -> None:
-    title, markdown = build_dingtalk_markdown(task_id, dry_run, results, screenshots)
+    title, markdown = build_dingtalk_markdown(task_id, dry_run, results, screenshots, retry_mode=retry_mode)
     payload = {
         "msgtype": "markdown",
         "markdown": {"title": title, "text": markdown},
@@ -46,8 +47,9 @@ async def send_telegram_notification(
     results: list[TargetResult],
     account_id: str | None = None,
     finished_at: datetime | None = None,
+    retry_mode: str | None = None,
 ) -> None:
-    message = build_telegram_message(task_id, dry_run, results, account_id, finished_at)
+    message = build_telegram_message(task_id, dry_run, results, account_id, finished_at, retry_mode)
     for chunk in split_telegram_message(message):
         await asyncio.to_thread(_post_telegram_message, bot_token, chat_id, chunk)
 
@@ -58,10 +60,13 @@ def build_telegram_message(
     results: list[TargetResult],
     account_id: str | None = None,
     finished_at: datetime | None = None,
+    retry_mode: str | None = None,
 ) -> str:
     successes = [result for result in results if result.status == "success"]
-    failures = [result for result in results if result.status == "failed"]
-    status = "✅ 抖音任务成功" if not failures else "❌ 抖音任务存在失败"
+    unconfirmed = [result for result in results if result.status == "unconfirmed"]
+    account_failures = [result for result in results if _is_account_failure(result)]
+    failures = [result for result in results if result.status == "failed" and result not in account_failures]
+    status = _telegram_status(successes, failures, unconfirmed, account_failures, retry_mode)
     mode = "Dry Run（未发送消息）" if dry_run else "正式运行"
     finished = (finished_at or datetime.now(timezone.utc)).astimezone(NOTIFY_TIMEZONE).strftime(
         "%Y-%m-%d %H:%M:%S %z"
@@ -73,7 +78,7 @@ def build_telegram_message(
         [
             f"模式：{mode}",
             f"完成时间：{finished}",
-            f"结果：成功 {len(successes)} 人，失败 {len(failures)} 人",
+            f"结果：成功 {len(successes)}，失败 {len(failures)}，未确认 {len(unconfirmed)}，账号故障 {len(account_failures)}",
             "",
             f"成功好友（{len(successes)}）：",
         ]
@@ -85,7 +90,7 @@ def build_telegram_message(
     else:
         lines.append("- 无")
 
-    lines.extend(["", f"失败好友（{len(failures)}）："])
+    lines.extend(["", f"失败目标（{len(failures)}）："])
     if failures:
         for result in failures:
             error = _telegram_text(result.error or "未知错误", limit=300)
@@ -93,6 +98,14 @@ def build_telegram_message(
             lines.append(f"- {_telegram_text(result.target, limit=100)}{sent}：{error}")
     else:
         lines.append("- 无")
+    if unconfirmed:
+        lines.extend(["", f"未确认（{len(unconfirmed)}，不会自动重发）："])
+        for result in unconfirmed:
+            lines.append(f"- {_telegram_text(result.target, limit=100)}：{_telegram_text(result.error or '发送结果未确认', limit=300)}")
+    if account_failures:
+        lines.extend(["", f"账号级故障（{len(account_failures)}）："])
+        for result in account_failures:
+            lines.append(f"- {_telegram_text(result.failure_category or 'unknown', limit=100)}：{_telegram_text(result.error or '账号已停止', limit=300)}")
     return "\n".join(lines)
 
 
@@ -121,10 +134,13 @@ def build_dingtalk_markdown(
     results: list[TargetResult],
     screenshots: list[Path],
     finished_at: datetime | None = None,
+    retry_mode: str | None = None,
 ) -> tuple[str, str]:
     successes = [result for result in results if result.status == "success"]
-    failures = [result for result in results if result.status == "failed"]
-    status = "全部成功" if not failures else "存在失败"
+    unconfirmed = [result for result in results if result.status == "unconfirmed"]
+    account_failures = [result for result in results if _is_account_failure(result)]
+    failures = [result for result in results if result.status == "failed" and result not in account_failures]
+    status = _dingtalk_status(successes, failures, unconfirmed, account_failures, retry_mode)
     mode = "检查模式（未发送消息）" if dry_run else "正式发送"
     finished = (finished_at or datetime.now(timezone.utc)).astimezone(NOTIFY_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S %z")
     title = f"抖音自动发送：{status}"
@@ -134,7 +150,7 @@ def build_dingtalk_markdown(
         f"> **任务**：{_markdown_text(task_id, limit=100)}  ",
         f"> **模式**：{mode}  ",
         f"> **完成时间**：{finished}  ",
-        f"> **结果**：成功 {len(successes)} 人，失败 {len(failures)} 人",
+        f"> **结果**：成功 {len(successes)}，失败 {len(failures)}，未确认 {len(unconfirmed)}，账号故障 {len(account_failures)}",
         "",
         f"#### 成功名单（{len(successes)}）",
     ]
@@ -146,6 +162,17 @@ def build_dingtalk_markdown(
             lines.append(f"- 其余 {len(successes) - MAX_RESULTS_PER_SECTION} 人已省略")
     else:
         lines.append("无")
+
+    if unconfirmed:
+        lines.extend(["", f"#### 未确认（{len(unconfirmed)}，不会自动重发）"])
+        for index, result in enumerate(unconfirmed[:MAX_RESULTS_PER_SECTION], 1):
+            lines.append(f"{index}. **{_markdown_text(result.target, limit=100)}**")
+            lines.append(f"   - 原因：{_markdown_text(result.error or '发送结果未确认', limit=300)}")
+
+    if account_failures:
+        lines.extend(["", f"#### 账号级故障（{len(account_failures)}）"])
+        for result in account_failures[:MAX_RESULTS_PER_SECTION]:
+            lines.append(f"- **{_markdown_text(result.failure_category or 'unknown')}**：{_markdown_text(result.error or '账号已停止', limit=300)}")
 
     lines.extend(["", f"#### 失败名单（{len(failures)}）"])
     if failures:
@@ -174,6 +201,38 @@ def build_dingtalk_markdown(
             )
 
     return title, _truncate_utf8("\n".join(lines), MAX_MARKDOWN_BYTES)
+
+
+def _is_account_failure(result: TargetResult) -> bool:
+    return result.failure_category in {"login_required", "risk_control", "rate_limited", "browser_startup"}
+
+
+def _telegram_status(successes, failures, unconfirmed, account_failures, retry_mode: str | None) -> str:
+    if account_failures:
+        return "⛔ 抖音任务发生账号级故障"
+    if unconfirmed:
+        return "⚠️ 抖音任务存在未确认发送"
+    if failures and successes:
+        return "⚠️ 抖音任务部分成功"
+    if failures:
+        return "❌ 抖音任务存在失败"
+    if retry_mode and successes:
+        return "✅ 抖音任务重试后恢复成功"
+    return "✅ 抖音任务成功"
+
+
+def _dingtalk_status(successes, failures, unconfirmed, account_failures, retry_mode: str | None) -> str:
+    if account_failures:
+        return "账号级故障"
+    if unconfirmed:
+        return "存在未确认发送"
+    if failures and successes:
+        return "部分成功"
+    if failures:
+        return "存在失败"
+    if retry_mode and successes:
+        return "重试后恢复成功"
+    return "全部成功"
 
 
 def _signed_webhook_url(webhook: str, secret: str, timestamp_ms: int | None = None) -> str:

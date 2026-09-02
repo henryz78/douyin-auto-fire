@@ -95,7 +95,7 @@ async def test_opens_chat_directly_before_checking_login() -> None:
     page.goto = AsyncMock()
     page.wait_for_timeout = AsyncMock()
 
-    with patch("app.browser._any_visible", new=AsyncMock(side_effect=[False, False])):
+    with patch("app.browser._any_visible", new=AsyncMock(side_effect=[False, False, False])):
         with patch("app.browser._first_visible_selector", new=AsyncMock(return_value='input[placeholder*="搜索"]')):
             await open_private_messages(page)
 
@@ -114,7 +114,7 @@ async def test_chat_navigation_retries_transient_network_error() -> None:
     )
     page.wait_for_timeout = AsyncMock()
 
-    with patch("app.browser._any_visible", new=AsyncMock(side_effect=[False, False])):
+    with patch("app.browser._any_visible", new=AsyncMock(side_effect=[False, False, False])):
         with patch("app.browser._first_visible_selector", new=AsyncMock(return_value='input[placeholder*="搜索"]')):
             await open_private_messages(page)
 
@@ -232,7 +232,7 @@ async def test_search_hit_emits_no_diagnostic(caplog) -> None:
     page.goto = AsyncMock()
     page.wait_for_timeout = AsyncMock()
 
-    with patch("app.browser._any_visible", new=AsyncMock(side_effect=[False, False])):
+    with patch("app.browser._any_visible", new=AsyncMock(side_effect=[False, False, False])):
         with patch("app.browser._first_visible_selector", new=AsyncMock(return_value='input[placeholder*="搜索"]')):
             with caplog.at_level(logging.ERROR, logger="douyin_sender"):
                 await open_private_messages(page)
@@ -292,7 +292,7 @@ async def test_login_required_still_raises_before_search_check() -> None:
     page = MagicMock()
     page.goto = AsyncMock()
 
-    with patch("app.browser._any_visible", new=AsyncMock(side_effect=[False, True])):
+    with patch("app.browser._any_visible", new=AsyncMock(side_effect=[False, False, True])):
         with pytest.raises(AuthenticationError, match="登录状态失效"):
             await open_private_messages(page)
 

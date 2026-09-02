@@ -108,6 +108,27 @@ def test_write_results_json_is_redacted(tmp_path: Path) -> None:
     assert "张三" not in content
     assert "李四" not in content
 
+    payload = json.loads(content)
+    assert payload["schema_version"] == 1
+    assert payload["run_id"]
+    assert payload["started_at"]
+    assert payload["finished_at"]
+    assert payload["overall_status"] == "partial_success"
+    assert payload["targets"] == payload["results"]
+    assert list(tmp_path.glob("result.json.*.tmp")) == []
+
+
+def test_result_identity_is_stable_but_not_exposed(tmp_path: Path) -> None:
+    import app.main as main_module
+
+    result = TargetResult(target="张三", identity="sec_uid_secret", status="success", target_alias="好友01")
+    main_module._write_results(tmp_path, "task", False, [result], {"张三": "好友01"})
+
+    content = (tmp_path / "result.json").read_text(encoding="utf-8")
+    payload = json.loads(content)
+    assert "sec_uid_secret" not in content
+    assert payload["targets"][0]["identity"].startswith("sha256:")
+
 
 def test_screenshot_filename_uses_alias_not_real_name(tmp_path: Path) -> None:
     import asyncio

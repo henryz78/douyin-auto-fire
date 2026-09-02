@@ -7,7 +7,9 @@ import logging
 import random
 import re
 import hashlib
-from dataclasses import asdict
+import os
+import uuid
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -40,6 +42,8 @@ async def run(
     settings.artifacts_dir.mkdir(parents=True, exist_ok=True)
     aliases = build_target_aliases(task.targets)
     _configure_logging(settings.artifacts_dir, aliases)
+    run_id = uuid.uuid4().hex
+    started_at = datetime.now().astimezone().isoformat()
 
     if not settings.storage_state and not settings.cookie:
         raise ConfigError("必须配置 DOUYIN_STORAGE_STATE 或 DOUYIN_COOKIE")
@@ -97,7 +101,7 @@ async def run(
                     )
                     if not dry_run and not selected:
                         status = "duplicate" if duplicate_count else "skipped"
-                        results.append(TargetResult(target=target.name, status=status, target_alias=alias))
+                        results.append(TargetResult(target=target.name, status=status, target_alias=alias, identity=target.identity_key))
                         continue
                     current_key: str | None = None
                     opened = False
@@ -108,6 +112,7 @@ async def run(
                         opened = True
                         if not dry_run:
                             for selected_index, (message_index, message, message_id, key) in enumerate(selected):
+                                await verify_login(page, timeout_ms=3_000)
                                 current_key = key
                                 began = history.reserve(
                                     key,
@@ -120,7 +125,6 @@ async def run(
                                     duplicate_count += 1
                                     current_key = None
                                     continue
-                                await verify_login(page, timeout_ms=3_000)
                                 await send_message(page, chat, message, task.stickers)
                                 history.mark_success(key)
                                 current_key = None
@@ -128,7 +132,7 @@ async def run(
                                 if selected_index < len(selected) - 1:
                                     await asyncio.sleep(random.uniform(task.interval_min, task.interval_max))
                         status = "success" if sent or dry_run else "duplicate"
-                        results.append(TargetResult(target=target.name, status=status, sent=sent, target_alias=alias))
+                        results.append(TargetResult(target=target.name, status=status, sent=sent, target_alias=alias, identity=target.identity_key))
                     except (AuthenticationError, RiskControlError, RateLimitedError) as exc:
                         category = classify_failure(exc, stage="send" if opened else "target_open")
                         _persist_target_failure(
@@ -161,6 +165,7 @@ async def run(
                                 error=str(exc),
                                 target_alias=alias,
                                 failure_category=category,
+                                identity=target.identity_key,
                             )
                         )
                         fatal_error = exc
@@ -198,6 +203,7 @@ async def run(
                                 error=str(exc),
                                 target_alias=alias,
                                 failure_category=category,
+                                identity=target.identity_key,
                             )
                         )
                         if retry_policy(category).abort_account:
@@ -218,6 +224,11 @@ async def run(
                     if fatal_error is None:
                         fatal_error = exc
                         results.append(TargetResult(target="运行收尾", status="failed", error=str(exc)))
+    except AccountCooldownError as exc:
+        if fatal_error is None:
+            fatal_error = exc
+            account_failure_category = exc.failure_category
+            results.append(TargetResult(target="账号检查", status="failed", error=str(exc), failure_category=exc.failure_category))
     except Exception as exc:
         if fatal_error is None:
             category = classify_failure(exc, stage="browser_startup")
@@ -230,9 +241,23 @@ async def run(
     if account_failure_category is None:
         account_state.mark_ready()
 
-    _write_results(settings.artifacts_dir, task.task_id, dry_run, results, aliases)
-    await _notify_dingtalk(settings, task.task_id, dry_run, results, screenshots)
-    await _notify_telegram(settings, task.task_id, dry_run, results)
+    results = _enrich_results(results, task, history, run_date, settings.artifacts_dir, screenshots)
+    finished_at = datetime.now().astimezone().isoformat()
+    _write_results(
+        settings.artifacts_dir,
+        task.task_id,
+        dry_run,
+        results,
+        aliases,
+        run_id=run_id,
+        account_id=settings.account_id,
+        started_at=started_at,
+        finished_at=finished_at,
+        retry_mode=retry_mode,
+        screenshots=screenshots,
+    )
+    await _notify_dingtalk(settings, task.task_id, dry_run, results, screenshots, retry_mode=retry_mode)
+    await _notify_telegram(settings, task.task_id, dry_run, results, retry_mode=retry_mode)
     succeeded = sum(result.status in {"success", "duplicate", "skipped"} for result in results)
     failed = sum(result.status in {"failed", "unconfirmed"} for result in results)
     LOGGER.info("执行结束: 成功/跳过 %d，失败或未确认 %d", succeeded, failed)
@@ -401,14 +426,36 @@ def _write_results(
     dry_run: bool,
     results: list[TargetResult],
     aliases: dict[str, str] | None = None,
+    *,
+    run_id: str | None = None,
+    account_id: str | None = None,
+    started_at: str | None = None,
+    finished_at: str | None = None,
+    retry_mode: RetryMode | None = None,
+    screenshots: list[Path] | None = None,
 ) -> None:
+    finished = finished_at or datetime.now().astimezone().isoformat()
     payload = {
+        "schema_version": 1,
+        "run_id": run_id or uuid.uuid4().hex,
+        "account_id": account_id,
+        "started_at": started_at or finished,
+        "finished_at": finished,
+        "overall_status": _overall_status(results),
         "task_id": task_id,
         "dry_run": dry_run,
-        "finished_at": datetime.now().astimezone().isoformat(),
+        "retry_mode": retry_mode,
         "results": [_redacted_result(result, aliases) for result in results],
+        "targets": [_redacted_result(result, aliases) for result in results],
+        "artifacts": [_artifact_reference(path, artifacts_dir) for path in (screenshots or [])],
     }
-    (artifacts_dir / "result.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    temporary = artifacts_dir / f"result.json.{os.getpid()}.tmp"
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, artifacts_dir / "result.json")
 
 
 def _redacted_result(result: TargetResult, aliases: dict[str, str] | None = None) -> dict:
@@ -416,10 +463,81 @@ def _redacted_result(result: TargetResult, aliases: dict[str, str] | None = None
     aliases[result.target] = result.target_alias or aliases.get(result.target, result.target)
     return {
         "target": aliases[result.target],
+        "identity": _identity_reference(result.identity),
+        "display_label": aliases[result.target],
         "status": result.status,
         "sent": result.sent,
         "error": redact_text(result.error, aliases) if result.error else None,
+        "failure_category": result.failure_category,
+        "attempt_count": result.attempt_count,
+        "first_attempt_at": result.first_attempt_at,
+        "last_attempt_at": result.last_attempt_at,
+        "retryable": result.retryable,
+        "artifacts": list(result.artifacts),
     }
+
+
+def _overall_status(results: list[TargetResult]) -> str:
+    if any(result.failure_category in {"login_required", "risk_control", "rate_limited", "browser_startup"} for result in results):
+        return "account_failure"
+    if any(result.status == "unconfirmed" for result in results):
+        return "unconfirmed"
+    if any(result.status == "failed" for result in results):
+        return "partial_success" if any(result.status == "success" for result in results) else "failed"
+    return "success"
+
+
+def _enrich_results(results, task, history, run_date: str, artifacts_dir: Path, screenshots: list[Path]):
+    enriched = []
+    for result in results:
+        target = next((item for item in task.targets if item.name == result.target), None)
+        if target is None:
+            enriched.append(result)
+            continue
+        entries = []
+        for _, _, _, key in _message_plans(history, task.task_id, run_date, target):
+            entry = history.entry(key)
+            if isinstance(entry, dict):
+                entries.append(entry)
+        attempts = max((_safe_int(entry.get("attempt_count")) for entry in entries), default=0)
+        first = min((entry.get("first_attempt_at") for entry in entries if entry.get("first_attempt_at")), default=None)
+        last = max((entry.get("last_attempt_at") for entry in entries if entry.get("last_attempt_at")), default=None)
+        category = result.failure_category or next((entry.get("failure_category") for entry in entries if entry.get("failure_category")), None)
+        matching_screenshots = [
+            path for path in screenshots if result.target_alias and result.target_alias in path.name
+        ]
+        artifact_refs = tuple(_artifact_reference(path, artifacts_dir) for path in matching_screenshots)
+        enriched.append(replace(
+            result,
+            identity=result.identity or target.identity_key,
+            failure_category=category,
+            attempt_count=result.attempt_count or attempts,
+            first_attempt_at=result.first_attempt_at or first,
+            last_attempt_at=result.last_attempt_at or last,
+            retryable=result.retryable or (category is not None and manual_retry_allowed(category, attempts or 0)),
+            artifacts=result.artifacts or artifact_refs,
+        ))
+    return enriched
+
+
+def _safe_int(value) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _identity_reference(identity: str | None) -> str | None:
+    if not identity:
+        return None
+    return f"sha256:{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _artifact_reference(path: Path, artifacts_dir: Path) -> str:
+    try:
+        return str(path.relative_to(artifacts_dir))
+    except ValueError:
+        return path.name
 
 
 async def _notify_dingtalk(
@@ -428,6 +546,7 @@ async def _notify_dingtalk(
     dry_run: bool,
     results: list[TargetResult],
     screenshots: list[Path],
+    retry_mode: RetryMode | None = None,
 ) -> None:
     if not settings.dingtalk_webhook or not settings.dingtalk_secret:
         return
@@ -439,6 +558,7 @@ async def _notify_dingtalk(
             dry_run,
             results,
             screenshots,
+            retry_mode=retry_mode,
         )
         LOGGER.info("钉钉通知发送成功")
     except Exception:
@@ -450,6 +570,7 @@ async def _notify_telegram(
     task_id: str,
     dry_run: bool,
     results: list[TargetResult],
+    retry_mode: RetryMode | None = None,
 ) -> None:
     if not settings.telegram_bot_token or not settings.telegram_chat_id:
         return
@@ -461,6 +582,7 @@ async def _notify_telegram(
             dry_run,
             results,
             account_id=settings.account_id,
+            retry_mode=retry_mode,
         )
         LOGGER.info("Telegram 通知发送成功")
     except Exception:
