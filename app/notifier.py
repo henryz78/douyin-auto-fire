@@ -271,11 +271,17 @@ def _post_json(url: str, payload: dict) -> None:
         headers={"Content-Type": "application/json; charset=utf-8"},
         method="POST",
     )
-    with urlopen(request, timeout=15) as response:
-        body = response.read().decode("utf-8")
-    result = json.loads(body)
-    if result.get("errcode") != 0:
-        raise RuntimeError(f"钉钉机器人返回错误: {result.get('errmsg', body)}")
+    try:
+        with urlopen(request, timeout=15) as response:
+            body = response.read().decode("utf-8")
+        result = json.loads(body)
+    except Exception:
+        # The request URL contains the signed webhook and the response body can
+        # echo request details.  Keep the exception safe for all callers,
+        # including code outside main._notify_dingtalk.
+        raise RuntimeError("钉钉机器人请求失败") from None
+    if not isinstance(result, dict) or result.get("errcode") != 0:
+        raise RuntimeError("钉钉机器人返回错误")
 
 
 def _post_telegram_message(bot_token: str, chat_id: str, text: str) -> None:

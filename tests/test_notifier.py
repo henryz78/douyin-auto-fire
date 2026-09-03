@@ -14,6 +14,7 @@ from app.notifier import (
     _signed_webhook_url,
     build_dingtalk_markdown,
     build_telegram_message,
+    _post_json,
     send_telegram_notification,
     split_telegram_message,
 )
@@ -202,6 +203,20 @@ def test_dingtalk_markdown_redacts_configured_secrets(monkeypatch) -> None:
 
     assert "WEBHOOK_SECRET" not in markdown
     assert "SIGN_SECRET" not in markdown
+
+
+def test_dingtalk_http_failure_does_not_expose_url_or_response(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.notifier.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("https://example.test?access_token=WEBHOOK_SECRET")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="钉钉机器人请求失败") as exc_info:
+        _post_json("https://example.test?access_token=WEBHOOK_SECRET", {})
+
+    assert "WEBHOOK_SECRET" not in str(exc_info.value)
 
 
 def test_split_telegram_message_preserves_content_and_limit() -> None:
