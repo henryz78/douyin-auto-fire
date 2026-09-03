@@ -6,9 +6,11 @@ import io
 import json
 import os
 import shutil
+import stat
 import sys
 import tarfile
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Iterable
@@ -17,6 +19,7 @@ from typing import Iterable
 STATE_ARCHIVE_SCHEMA_VERSION = 1
 STATE_WORKFLOW = "send.yml"
 STATE_FILENAMES = frozenset({"history.json", "account-state.json"})
+MAX_OUTER_ARCHIVE_BYTES = 64 * 1024 * 1024
 
 
 class StateArchiveError(ValueError):
@@ -89,6 +92,42 @@ def prepare_archive(
     return files
 
 
+def extract_state_archive(zip_path: Path, output: Path) -> Path:
+    """Extract exactly one state tarball from an Actions artifact ZIP.
+
+    ``actions/upload-artifact`` wraps the uploaded file in a ZIP.  Do not use
+    a general-purpose extractor here: the ZIP is downloaded from the API and
+    must be treated as untrusted input before the inner tar manifest is read.
+    """
+
+    zip_path = Path(zip_path)
+    try:
+        with zipfile.ZipFile(zip_path, mode="r") as archive:
+            candidates: list[zipfile.ZipInfo] = []
+            for member in archive.infolist():
+                if member.is_dir():
+                    continue
+                relative = _zip_relative(member.filename)
+                if relative.name != "state.tar.gz":
+                    raise StateArchiveError(f"Artifact ZIP 包含未允许的文件: {member.filename}")
+                if _zip_is_symlink(member):
+                    raise StateArchiveError(f"Artifact ZIP 包含符号链接: {member.filename}")
+                candidates.append(member)
+            if len(candidates) != 1:
+                raise StateArchiveError("Artifact ZIP 必须包含唯一的 state.tar.gz")
+            member = candidates[0]
+            if member.file_size < 0 or member.file_size > MAX_OUTER_ARCHIVE_BYTES:
+                raise StateArchiveError("Artifact ZIP 中的状态归档过大")
+            data = archive.read(member)
+    except StateArchiveError:
+        raise
+    except (OSError, UnicodeError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+        raise StateArchiveError(f"Artifact ZIP 无法安全读取: {zip_path}") from exc
+
+    _atomic_write_bytes(Path(output), data)
+    return Path(output)
+
+
 def restore_archive(
     archive_path: Path,
     artifacts_dir: Path,
@@ -141,6 +180,7 @@ def restore_archive(
 
     if not contents:
         raise StateArchiveError("持久化状态归档不包含 history.json 或 account-state.json")
+    _validate_complete_state_set(contents)
 
     artifacts_dir = Path(artifacts_dir)
     if artifacts_dir.exists() and artifacts_dir.is_symlink():
@@ -185,6 +225,8 @@ def _assert_safe_destination(root: Path, relative: PurePosixPath) -> None:
 
 def _state_files(artifacts_dir: Path) -> Iterable[PurePosixPath]:
     artifacts_dir = Path(artifacts_dir)
+    if artifacts_dir.is_symlink():
+        raise StateArchiveError(f"状态目录不能是符号链接: {artifacts_dir}")
     if not artifacts_dir.is_dir():
         return ()
     result: list[PurePosixPath] = []
@@ -199,7 +241,21 @@ def _state_files(artifacts_dir: Path) -> Iterable[PurePosixPath]:
         if len(relative.parts) > 2 or ".." in relative.parts:
             raise StateArchiveError(f"状态文件路径不受支持: {relative}")
         result.append(relative)
+    _validate_complete_state_set(result)
     return tuple(sorted(result))
+
+
+def _validate_complete_state_set(paths: Iterable[PurePosixPath]) -> None:
+    """Require history and account state to travel as an inseparable pair."""
+
+    by_directory: dict[str, set[str]] = {}
+    for relative in paths:
+        directory = relative.parent.as_posix()
+        by_directory.setdefault(directory, set()).add(relative.name)
+    for directory, names in by_directory.items():
+        if names != STATE_FILENAMES:
+            label = "artifacts" if directory == "." else f"artifacts/{directory}"
+            raise StateArchiveError(f"状态文件必须同时包含 history.json 和 account-state.json: {label}")
 
 
 def _read_and_validate_state(path: Path, relative: PurePosixPath) -> bytes:
@@ -234,6 +290,24 @@ def _add_bytes(archive: tarfile.TarFile, name: PurePosixPath, data: bytes) -> No
     archive.addfile(info, io.BytesIO(data))
 
 
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def _find_unique_member(members: list[tarfile.TarInfo], name: str) -> tarfile.TarInfo:
     matches = [member for member in members if member.name == name]
     if len(matches) != 1 or not matches[0].isfile():
@@ -254,6 +328,24 @@ def _archive_relative(name: str) -> PurePosixPath:
     ):
         raise StateArchiveError(f"持久化状态归档路径无效: {name}")
     return relative
+
+
+def _zip_relative(name: str) -> PurePosixPath:
+    relative = PurePosixPath(name)
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or ".." in relative.parts
+    ):
+        raise StateArchiveError(f"Artifact ZIP 路径无效: {name}")
+    if relative.name != "state.tar.gz":
+        raise StateArchiveError(f"Artifact ZIP 包含未允许的文件: {name}")
+    return relative
+
+
+def _zip_is_symlink(member: zipfile.ZipInfo) -> bool:
+    mode = (member.external_attr >> 16) & 0xFFFF
+    return stat.S_ISLNK(mode)
 
 
 def _load_manifest(data: bytes, *, branch: str, workflow: str) -> dict:
@@ -312,6 +404,10 @@ def _build_parser() -> argparse.ArgumentParser:
     restore.add_argument("--artifacts-dir", required=True, type=Path)
     restore.add_argument("--branch", required=True)
     restore.add_argument("--workflow", default=STATE_WORKFLOW)
+
+    extract = subparsers.add_parser("extract-zip")
+    extract.add_argument("--zip", required=True, dest="zip_path", type=Path)
+    extract.add_argument("--output", required=True, type=Path)
     return parser
 
 
@@ -326,8 +422,10 @@ def main(argv: list[str] | None = None) -> int:
                 run_id=args.run_id,
                 run_attempt=args.run_attempt,
             )
-        else:
+        elif args.command == "restore":
             restore_archive(args.archive, args.artifacts_dir, branch=args.branch, workflow=args.workflow)
+        else:
+            extract_state_archive(args.zip_path, args.output)
     except NoStateFilesError as exc:
         print(str(exc), file=sys.stderr)
         return 3
