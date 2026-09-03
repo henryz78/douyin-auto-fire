@@ -5,6 +5,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.test-tmp/
 artifacts/*
 !artifacts/.gitkeep
 config/tasks.json
