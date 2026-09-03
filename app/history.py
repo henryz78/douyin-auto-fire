@@ -37,6 +37,19 @@ class History:
     def contains(self, key: str) -> bool:
         return key in self.entries
 
+    def ensure_persisted(self) -> None:
+        """Materialize an empty schema file for a normal run.
+
+        A run can fail before reserving its first message (for example while
+        checking login or risk state). Persisting the empty history before
+        that work keeps it paired with ``account-state.json`` for the
+        cross-run archive, while callers can deliberately skip this method in
+        Dry Run mode so Dry Run never changes history.
+        """
+
+        if not self.path.exists():
+            self._save()
+
     def entry(self, key: str) -> dict | None:
         value = self.entries.get(key)
         return dict(value) if isinstance(value, dict) else None

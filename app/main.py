@@ -55,6 +55,11 @@ async def run(
         settings.artifacts_dir / "account-state.json",
         account_id,
     )
+    if not dry_run:
+        # Keep history/account-state as an inseparable pair even when the
+        # account fails before the first target is reserved. Dry Run is
+        # intentionally excluded so it remains history-neutral.
+        history.ensure_persisted()
     run_date = history.run_date(task.timezone)
     if retry_mode == "unconfirmed":
         LOGGER.warning("显式重试未确认消息：这些消息可能已经发送，存在重复发送风险")

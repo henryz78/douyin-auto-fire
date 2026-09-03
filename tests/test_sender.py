@@ -11,6 +11,7 @@ from app.sender import (
     SEND_BUTTONS,
     SEND_FAILURE_MARKERS,
     SEND_PENDING_MARKERS,
+    StickerNotSubmittedError,
     _await_send_terminal_state,
     _click_and_confirm_sticker,
     _confirm_outgoing_message,
@@ -288,7 +289,7 @@ async def test_sticker_click_retries_via_publish_when_staged(monkeypatch) -> Non
     async def fake_confirm(_page, _before, _name, _key=""):
         calls["confirm"] += 1
         if calls["confirm"] == 1:
-            raise PageOperationError("未检测到新的已发送消息")
+            raise StickerNotSubmittedError("未检测到新的已发送消息")
         return None
 
     async def fake_trigger(_page):
@@ -337,6 +338,60 @@ async def test_sticker_click_raises_when_not_staged(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_sticker_click_does_not_retry_after_explicit_send_failure(monkeypatch) -> None:
+    item = MagicMock()
+    item.get_attribute = AsyncMock(return_value=None)
+    item.click = AsyncMock()
+    img_first = MagicMock()
+    img_first.count = AsyncMock(return_value=0)
+    img_loc = MagicMock()
+    img_loc.first = img_first
+    item.locator.return_value = img_loc
+    page = MagicMock()
+    trigger = AsyncMock()
+    ready = AsyncMock(return_value=True)
+
+    async def fail(_page, _before, _name, _key=""):
+        raise PageOperationError("原生表情发送失败，页面提示可以重试")
+
+    monkeypatch.setattr("app.sender._confirm_sticker_sent", fail)
+    monkeypatch.setattr("app.sender._trigger_send", trigger)
+    monkeypatch.setattr("app.sender._publish_ready", ready)
+
+    with pytest.raises(PageOperationError, match="发送失败"):
+        await _click_and_confirm_sticker(page, item, ("anchor", "old"), "比心")
+    trigger.assert_not_awaited()
+    ready.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sticker_click_does_not_retry_after_unconfirmed_send(monkeypatch) -> None:
+    item = MagicMock()
+    item.get_attribute = AsyncMock(return_value=None)
+    item.click = AsyncMock()
+    img_first = MagicMock()
+    img_first.count = AsyncMock(return_value=0)
+    img_loc = MagicMock()
+    img_loc.first = img_first
+    item.locator.return_value = img_loc
+    page = MagicMock()
+    trigger = AsyncMock()
+    ready = AsyncMock(return_value=True)
+
+    async def fail(_page, _before, _name, _key=""):
+        raise PageOperationError("原生表情发送状态未能确认，为避免重复不会自动重试")
+
+    monkeypatch.setattr("app.sender._confirm_sticker_sent", fail)
+    monkeypatch.setattr("app.sender._trigger_send", trigger)
+    monkeypatch.setattr("app.sender._publish_ready", ready)
+
+    with pytest.raises(PageOperationError, match="状态未能确认"):
+        await _click_and_confirm_sticker(page, item, ("anchor", "old"), "比心")
+    trigger.assert_not_awaited()
+    ready.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_missing_sticker_mapping_fails() -> None:
     with pytest.raises(Exception, match="没有原生表情映射"):
         await send_message(AsyncMock(), AsyncMock(), Message(type="douyin_sticker", sticker="比心"), {})
@@ -378,7 +433,7 @@ async def test_sticker_confirmation_reports_missing_new_message() -> None:
     anchors.evaluate_all = AsyncMock()
     page.locator.return_value = anchors
 
-    with pytest.raises(PageOperationError, match="没有检测到新的已发送消息"):
+    with pytest.raises(StickerNotSubmittedError, match="没有检测到新的已发送消息"):
         await _confirm_sticker_sent(page, ("anchor", "old-content"), "比心")
 
 
@@ -558,18 +613,32 @@ async def test_confirm_clean_then_late_failure_fails(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_confirm_clean_then_late_failure_after_two_seconds_fails(monkeypatch) -> None:
+    # A retry marker appearing after the previous 2s grace window is still a
+    # failure. Keep the longer grace window covered so a clean early frame
+    # cannot be promoted to success before this late terminal state arrives.
+    frames = [(False, False)] * 8 + [(True, False)]
+    timeline = _Timeline(frames)
+    monkeypatch.setattr(sender_module, "_monotonic", lambda: timeline.clock)
+    page = _FakePage(timeline)
+
+    with pytest.raises(PageOperationError, match="发送失败"):
+        await _confirm_outgoing_message(page, ("anchor", "old"), "文字", expected_text="测试文字")
+
+
+@pytest.mark.asyncio
 async def test_confirm_sustained_clean_reaches_success_via_grace(monkeypatch) -> None:
     # Normal fast send: no spinner/retry ever appears. The bubble must reach
     # success once the initial-clean grace window elapses fully clean, WITHOUT
     # waiting the full total timeout (15s). Frames stay clean throughout.
-    # Enough clean frames to outlast the 2s grace window at 300ms/500ms polls.
+    # Enough clean frames to outlast the 3s grace window at 300ms/500ms polls.
     frames = [(False, False)] * 20
     timeline = _Timeline(frames)
     monkeypatch.setattr(sender_module, "_monotonic", lambda: timeline.clock)
     page = _FakePage(timeline)
 
     await _confirm_outgoing_message(page, ("anchor", "old"), "文字", expected_text="测试文字")
-    # Grace window (2s) is well below the total timeout (15s).
+    # Grace window (3s) is well below the total timeout (15s).
     assert timeline.clock < 15.0
 
 
@@ -866,7 +935,7 @@ async def test_real_clean_then_delayed_pending_then_success(monkeypatch) -> None
         page.wait_for_timeout = lambda ms: clock.wait_for_timeout(ms, page)
         scope = await _scope(page)
         # Should succeed: clean grace + pending appeared then cleared + stable.
-        await _await_send_terminal_state(page, scope, "文字", timeout_ms=2000)
+        await _await_send_terminal_state(page, scope, "文字", timeout_ms=5000)
     finally:
         await _teardown_real_page(page)
 
@@ -922,7 +991,7 @@ async def test_real_pending_then_success(monkeypatch) -> None:
         _patch_clock(monkeypatch, clock)
         page.wait_for_timeout = lambda ms: clock.wait_for_timeout(ms, page)
         scope = await _scope(page)
-        await _await_send_terminal_state(page, scope, "文字", timeout_ms=2000)
+        await _await_send_terminal_state(page, scope, "文字", timeout_ms=5000)
     finally:
         await _teardown_real_page(page)
 

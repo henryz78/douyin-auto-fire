@@ -23,6 +23,8 @@ MAX_OUTER_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_STATE_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_STATE_FILE_BYTES = 8 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1 * 1024 * 1024
+MAX_ZIP_MEMBERS = 16
+MAX_TAR_MEMBERS = 64
 
 
 class StateArchiveError(ValueError):
@@ -75,6 +77,8 @@ def prepare_archive(
         "files": records,
     }
     manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+    if len(manifest_bytes) > MAX_MANIFEST_BYTES:
+        raise StateArchiveError("持久化状态 manifest 过大")
 
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -109,9 +113,14 @@ def extract_state_archive(zip_path: Path, output: Path) -> Path:
 
     zip_path = Path(zip_path)
     try:
+        if zip_path.is_symlink() or zip_path.stat().st_size > MAX_OUTER_ARCHIVE_BYTES:
+            raise StateArchiveError("Artifact ZIP 状态归档过大或路径不安全")
         with zipfile.ZipFile(zip_path, mode="r") as archive:
+            members = archive.infolist()
+            if len(members) > MAX_ZIP_MEMBERS:
+                raise StateArchiveError("Artifact ZIP 包含过多文件")
             candidates: list[zipfile.ZipInfo] = []
-            for member in archive.infolist():
+            for member in members:
                 if member.is_dir():
                     continue
                 relative = _zip_relative(member.filename)
@@ -148,6 +157,8 @@ def restore_archive(
     try:
         with tarfile.open(archive_path, mode="r:gz") as archive:
             members = archive.getmembers()
+            if len(members) > MAX_TAR_MEMBERS:
+                raise StateArchiveError("持久化状态归档包含过多文件")
             manifest_member = _find_unique_member(members, "manifest.json")
             if manifest_member.size < 0 or manifest_member.size > MAX_MANIFEST_BYTES:
                 raise StateArchiveError("持久化状态 manifest 过大")

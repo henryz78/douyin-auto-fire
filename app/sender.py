@@ -12,6 +12,10 @@ from app.models import Message, Sticker
 from app.selectors import IMAGE_INPUTS, MESSAGE_INPUTS, STICKER_BUTTONS, STICKER_PANELS
 
 
+class StickerNotSubmittedError(PageOperationError):
+    """The sticker click only staged a composer payload, not an outgoing bubble."""
+
+
 def _monotonic() -> float:
     """Monotonic clock for the send-state deadline.
 
@@ -106,7 +110,7 @@ SEND_STABLE_INTERVAL_MS = 500
 # missed because the old single 500ms check ended before the retry mounted).
 # This is a continuous observation window, NOT a single sleep: the loop polls
 # every SEND_POLL_INTERVAL_MS throughout it.
-SEND_INITIAL_CLEAN_GRACE_MS = 2_000
+SEND_INITIAL_CLEAN_GRACE_MS = 3_000
 
 
 async def send_message(page: Page, chat: DouyinChat, message: Message, stickers: dict[str, Sticker]) -> None:
@@ -272,7 +276,7 @@ async def _click_and_confirm_sticker(page: Page, item, before: tuple[str, str], 
     await item.click(force=True)
     try:
         await _confirm_sticker_sent(page, before, name, resource_key)
-    except PageOperationError:
+    except StickerNotSubmittedError:
         if await _publish_ready(page):
             await _trigger_send(page)
             await _confirm_sticker_sent(page, before, name, resource_key)
@@ -297,7 +301,16 @@ async def _confirm_sticker_sent(
     name: str,
     resource_key: str = "",
 ) -> None:
-    await _confirm_outgoing_message(page, before, f"原生表情“{name}”", resource_key=resource_key)
+    try:
+        await _confirm_outgoing_message(page, before, f"原生表情“{name}”", resource_key=resource_key)
+    except PageOperationError as exc:
+        # A missing outgoing bubble is the only case we conservatively treat
+        # as a sticker click that staged the composer payload. Explicit send
+        # failure and terminal-state timeout errors remain ordinary
+        # PageOperationError values and are therefore fail-closed.
+        if "没有检测到新的已发送消息" in str(exc):
+            raise StickerNotSubmittedError(str(exc)) from exc
+        raise
 
 
 async def _marker_visible(scope: Locator, selectors: tuple[str, ...]) -> bool:
@@ -358,7 +371,7 @@ async def _await_send_terminal_state(
 
     # Phase 1: observe the freshly matched bubble. It is UNKNOWN until either a
     # state marker appears or the initial-clean grace window elapses clean.
-    grace_deadline = _monotonic() + SEND_INITIAL_CLEAN_GRACE_MS / 1000
+    grace_deadline = min(deadline, _monotonic() + SEND_INITIAL_CLEAN_GRACE_MS / 1000)
     while _monotonic() < grace_deadline:
         if _monotonic() >= deadline:
             raise PageOperationError(
@@ -371,6 +384,10 @@ async def _await_send_terminal_state(
         await page.wait_for_timeout(SEND_POLL_INTERVAL_MS)
     else:
         # Grace window elapsed fully clean -> fast success (normal fast send).
+        if _monotonic() >= deadline:
+            raise PageOperationError(
+                f"{label}发送状态未能确认（发送超时或状态不确定），为避免重复不会自动重试"
+            )
         return
 
     # Phase 2: a spinner appeared. Wait for it to clear (or flip to failure),

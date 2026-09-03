@@ -21,6 +21,17 @@ def test_history_persists_success(tmp_path: Path) -> None:
     assert payload["entries"][key]["status"] == "success"
 
 
+def test_history_can_materialize_empty_schema_for_normal_run(tmp_path: Path) -> None:
+    path = tmp_path / "history.json"
+    history = History(path)
+
+    assert not path.exists()
+    history.ensure_persisted()
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload == {"schema_version": HISTORY_SCHEMA_VERSION, "entries": {}}
+
+
 def test_legacy_unknown_history_migrates_fail_closed(tmp_path: Path) -> None:
     path = tmp_path / "history.json"
     path.write_text('{"task:2026-09-02:friend:message": {"status": "unknown"}}', encoding="utf-8")

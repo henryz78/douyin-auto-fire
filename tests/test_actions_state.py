@@ -374,6 +374,26 @@ def test_restore_rejects_oversized_state_member_before_reading_payload(tmp_path:
         restore_archive(archive, tmp_path / "artifacts", branch="main")
 
 
+def test_prepare_rejects_oversized_manifest(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(actions_state_module, "MAX_MANIFEST_BYTES", 1)
+    source = tmp_path / "source"
+    _make_state_tree(source)
+
+    with pytest.raises(StateArchiveError, match="manifest 过大"):
+        prepare_archive(source, tmp_path / "state.tar.gz", branch="main", run_id="123", run_attempt="1")
+
+
+def test_restore_rejects_too_many_inner_tar_members(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source"
+    _make_state_tree(source)
+    archive = tmp_path / "state.tar.gz"
+    prepare_archive(source, archive, branch="main", run_id="123", run_attempt="1")
+    monkeypatch.setattr(actions_state_module, "MAX_TAR_MEMBERS", 1)
+
+    with pytest.raises(StateArchiveError, match="包含过多文件"):
+        restore_archive(archive, tmp_path / "artifacts", branch="main")
+
+
 def test_restore_rejects_archive_with_only_one_state_file(tmp_path: Path) -> None:
     data = json.dumps(_history()).encode("utf-8")
     manifest = {
@@ -454,6 +474,26 @@ def test_extract_state_archive_rejects_path_traversal_and_extra_files(tmp_path: 
         extract_state_archive(outer, tmp_path / "state.tar.gz")
 
 
+def test_extract_state_archive_rejects_oversized_zip_and_excess_members(tmp_path: Path, monkeypatch) -> None:
+    inner = tmp_path / "state.tar.gz"
+    source = tmp_path / "source"
+    _make_state_tree(source)
+    prepare_archive(source, inner, branch="main", run_id="123", run_attempt="1")
+    outer = tmp_path / "artifact.zip"
+    with zipfile.ZipFile(outer, "w") as handle:
+        handle.write(inner, "state.tar.gz")
+        handle.writestr("metadata/", b"")
+
+    monkeypatch.setattr(actions_state_module, "MAX_ZIP_MEMBERS", 1)
+    with pytest.raises(StateArchiveError, match="包含过多文件"):
+        extract_state_archive(outer, tmp_path / "restored.tar.gz")
+
+    monkeypatch.setattr(actions_state_module, "MAX_ZIP_MEMBERS", 16)
+    monkeypatch.setattr(actions_state_module, "MAX_OUTER_ARCHIVE_BYTES", 1)
+    with pytest.raises(StateArchiveError, match="归档过大"):
+        extract_state_archive(outer, tmp_path / "restored.tar.gz")
+
+
 def test_extract_state_archive_rejects_duplicate_state_files(tmp_path: Path) -> None:
     outer = tmp_path / "duplicate.zip"
     with zipfile.ZipFile(outer, "w") as handle:
@@ -503,7 +543,12 @@ def test_send_workflow_restores_and_uploads_only_non_dry_run_state() -> None:
     assert "sha256" in workflow
     assert "page=${page}" in workflow
     assert "pending_prefix=\"douyin-state-pending-${STATE_BRANCH_KEY}-\"" in workflow
+    assert "os.environ.get(f\"COOKIE_{i}\") or os.environ.get(f\"CONFIG_{i}\")" in workflow
     assert "Upload send attempt marker" in workflow
+    assert 'expected="${prefix}${suffix}"' in workflow
+    assert "sort_by(.created_at)" in workflow
+    assert "page=$((page + 1))" in workflow
+    assert "bootstrap_state 不能与 Dry Run 同时使用" in workflow
     assert "python -m app.actions_state extract-zip" in workflow
     assert "python -m app.actions_state restore" in workflow
     assert "python -m app.actions_state prepare" in workflow

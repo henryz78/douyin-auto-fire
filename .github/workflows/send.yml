@@ -186,8 +186,12 @@ jobs:
           import os
           from pathlib import Path
 
-          if not any(os.environ.get(f"COOKIE_{i}") for i in range(1, 6)):
-              # 没有配置任何多账号 Secret（DOUYIN_COOKIE_ACCOUNTn）：
+          if not any(
+              os.environ.get(f"COOKIE_{i}") or os.environ.get(f"CONFIG_{i}")
+              for i in range(1, 6)
+          ):
+              # 没有配置任何多账号 Secret（DOUYIN_COOKIE_ACCOUNTn /
+              # DOUYIN_CONFIG_ACCOUNTn）：
               # 保持旧单账号模式，不生成 accounts.json。
               print("未配置多账号 Secret，继续使用旧单账号模式")
               raise SystemExit(0)
