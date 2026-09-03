@@ -58,6 +58,20 @@ def test_failed_and_unconfirmed_are_distinct(tmp_path: Path) -> None:
     assert uncertain_key not in history.retryable_failed_keys()
 
 
+def test_malformed_failed_unconfirmed_record_is_normalized_fail_closed(tmp_path: Path) -> None:
+    path = tmp_path / "history.json"
+    key = "task:date:friend:message"
+    path.write_text(
+        __import__("json").dumps({key: {"status": "failed", "failure_category": "send_unconfirmed"}}),
+        encoding="utf-8",
+    )
+
+    history = History(path)
+
+    assert history.entry(key)["status"] == "unconfirmed"
+    assert key not in history.retryable_failed_keys()
+
+
 def test_retry_limit_is_enforced_centrally(tmp_path: Path) -> None:
     history = History(tmp_path / "history.json")
     key = "task:date:friend:message"

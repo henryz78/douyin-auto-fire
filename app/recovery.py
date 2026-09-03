@@ -34,7 +34,7 @@ RETRY_POLICIES: dict[FailureCategory, RetryPolicy] = {
 def retry_policy(category: FailureCategory | None) -> RetryPolicy:
     if category is None:
         return RETRY_POLICIES["non_retryable"]
-    return RETRY_POLICIES[category]
+    return RETRY_POLICIES.get(category, RETRY_POLICIES["non_retryable"])
 
 
 def manual_retry_allowed(category: FailureCategory | None, attempt_count: int, limit: int = DEFAULT_RETRY_LIMIT) -> bool:

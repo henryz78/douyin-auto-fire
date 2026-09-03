@@ -22,7 +22,7 @@ from app.history import AlreadyRunningError, History, run_lock
 from app.models import Settings, TargetResult
 from app.notifier import send_dingtalk_notification, send_telegram_notification
 from app.privacy import RedactingFormatter, build_target_aliases, redact_text, target_alias
-from app.recovery import classify_failure, manual_retry_allowed, retry_policy
+from app.recovery import auto_retry_allowed, classify_failure, manual_retry_allowed, retry_policy
 from app.sender import send_message
 
 
@@ -100,17 +100,42 @@ async def run(
                         prevent_duplicates=task.prevent_duplicates,
                         retry_mode=retry_mode,
                     )
-                    selected, legacy_duplicates = _exclude_legacy_successes(
+                    selected = _include_legacy_retry_plans(
+                        history,
+                        task.task_id,
+                        run_date,
+                        target,
+                        plans,
+                        selected,
+                        retry_mode=retry_mode,
+                    )
+                    selected, legacy_duplicates = _exclude_legacy_terminal_states(
                         history,
                         task.task_id,
                         run_date,
                         target,
                         selected,
+                        retry_mode=retry_mode,
                     )
                     duplicate_count += legacy_duplicates
                     if not dry_run and not selected:
-                        status = "duplicate" if duplicate_count else "skipped"
-                        results.append(TargetResult(target=target.name, status=status, target_alias=alias, identity=target.identity_key))
+                        status, category = _blocked_target_status(
+                            history,
+                            task.task_id,
+                            run_date,
+                            target,
+                            plans,
+                            retry_mode=retry_mode,
+                        )
+                        results.append(
+                            TargetResult(
+                                target=target.name,
+                                status=status,
+                                target_alias=alias,
+                                failure_category=category,
+                                identity=target.identity_key,
+                            )
+                        )
                         continue
                     current_key: str | None = None
                     opened = False
@@ -128,7 +153,7 @@ async def run(
                                     target_key=target.identity_key,
                                     display_name=target.name,
                                     message_id=message_id,
-                                    allow_success_override=retry_mode is None and not task.prevent_duplicates,
+                                    allow_success_override=False,
                                 )
                                 if not began:
                                     duplicate_count += 1
@@ -344,10 +369,156 @@ def _select_message_plans(
     if retry_mode == "unconfirmed":
         allowed = history.unconfirmed_keys()
         return [plan for plan in plans if plan[3] in allowed], 0
-    if not prevent_duplicates:
-        return plans, 0
-    selected = [plan for plan in plans if not history.contains(plan[3])]
-    return selected, len(plans) - len(selected)
+    selected = []
+    blocked = 0
+    for plan in plans:
+        entry = history.entry(plan[3])
+        if prevent_duplicates and entry is not None:
+            blocked += 1
+            continue
+        if isinstance(entry, dict):
+            status = entry.get("status")
+            if status in {"success", "unconfirmed"}:
+                blocked += 1
+                continue
+            if status == "failed":
+                if not auto_retry_allowed(
+                    entry.get("failure_category"),
+                    _safe_int(entry.get("attempt_count")),
+                ):
+                    blocked += 1
+                    continue
+        selected.append(plan)
+    return selected, blocked
+
+
+def _exclude_legacy_terminal_states(
+    history: History,
+    task_id: str,
+    run_date: str,
+    target,
+    selected_plans: list[tuple[int, object, str, str]],
+    *,
+    retry_mode: RetryMode | None = None,
+) -> tuple[list[tuple[int, object, str, str]], int]:
+    """Honor name-keyed terminal states written before stable identity was added.
+
+    This is deliberately a one-way safety check: legacy success and
+    unconfirmed records are authoritative, while old failures are not guessed
+    or migrated. Explicit manual unconfirmed retry is allowed to opt into the
+    legacy record by retaining that plan.
+    """
+    if target.identity_key == target.name:
+        return selected_plans, 0
+    selected = []
+    duplicates = 0
+    current_keys = {
+        plan[2]: history.key(task_id, run_date, target.identity_key, plan[2])
+        for plan in selected_plans
+    }
+    for plan in selected_plans:
+        legacy_key = history.key(task_id, run_date, target.name, plan[2])
+        current_entry = history.entry(current_keys[plan[2]])
+        legacy_entry = history.entry(legacy_key)
+        statuses = {
+            entry.get("status")
+            for entry in (current_entry, legacy_entry)
+            if isinstance(entry, dict)
+        }
+        if "success" in statuses or ("unconfirmed" in statuses and retry_mode != "unconfirmed"):
+            duplicates += 1
+            continue
+        # If both identity keys contain an unconfirmed record, retry only the
+        # stable-identity plan. This prevents one explicit manual retry from
+        # sending the same message twice after an identity upgrade.
+        if retry_mode == "unconfirmed" and current_entry and current_entry.get("status") == "unconfirmed":
+            if plan[3] != current_keys[plan[2]]:
+                duplicates += 1
+                continue
+        selected.append(plan)
+    return selected, duplicates
+
+
+def _include_legacy_retry_plans(
+    history: History,
+    task_id: str,
+    run_date: str,
+    target,
+    candidate_plans: list[tuple[int, object, str, str]],
+    selected_plans: list[tuple[int, object, str, str]],
+    *,
+    retry_mode: RetryMode | None,
+) -> list[tuple[int, object, str, str]]:
+    """Expose legacy name-keyed failures to an explicit retry command."""
+    if target.identity_key == target.name or retry_mode not in {"failed", "unconfirmed"}:
+        return selected_plans
+    selected_keys = {plan[3] for plan in selected_plans}
+    allowed_status = "failed" if retry_mode == "failed" else "unconfirmed"
+    allowed_failed = history.retryable_failed_keys() if retry_mode == "failed" else set()
+    result = list(selected_plans)
+    for plan in candidate_plans:
+        legacy_key = history.key(task_id, run_date, target.name, plan[2])
+        current_entry = history.entry(plan[3])
+        legacy_entry = history.entry(legacy_key)
+        if not isinstance(legacy_entry, dict) or legacy_entry.get("status") != allowed_status:
+            continue
+        # A strong success under either alias always wins. If the stable key
+        # already has a record, keep that one authoritative instead of
+        # replaying an older name-keyed attempt as a second plan.
+        if any(
+            isinstance(entry, dict) and entry.get("status") == "success"
+            for entry in (current_entry, legacy_entry)
+        ) or current_entry is not None:
+            continue
+        if retry_mode == "failed" and legacy_key not in allowed_failed:
+            continue
+        if legacy_key not in selected_keys:
+            result.append((plan[0], plan[1], plan[2], legacy_key))
+            selected_keys.add(legacy_key)
+    return result
+
+
+def _history_entries_for_target(history: History, task_id: str, run_date: str, target, plans):
+    seen_keys: set[str] = set()
+    for plan in plans:
+        keys = [plan[3]]
+        if target.identity_key != target.name:
+            keys.append(history.key(task_id, run_date, target.name, plan[2]))
+        for key in keys:
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            entry = history.entry(key)
+            if isinstance(entry, dict):
+                yield entry
+
+
+def _blocked_target_status(
+    history: History,
+    task_id: str,
+    run_date: str,
+    target,
+    plans,
+    *,
+    retry_mode: RetryMode | None,
+) -> tuple[str, object | None]:
+    entries = list(_history_entries_for_target(history, task_id, run_date, target, plans))
+    statuses = {entry.get("status") for entry in entries}
+    if "unconfirmed" in statuses and retry_mode in {None, "unconfirmed"}:
+        category = next(
+            (entry.get("failure_category") for entry in entries if entry.get("status") == "unconfirmed"),
+            "send_unconfirmed",
+        )
+        return "unconfirmed", category
+    if "failed" in statuses and retry_mode in {None, "failed"}:
+        category = next(
+            (entry.get("failure_category") for entry in entries if entry.get("status") == "failed"),
+            "non_retryable",
+        )
+        return "failed", category
+    if "success" in statuses or retry_mode is None and any(status in statuses for status in {"duplicate"}):
+        return "duplicate", None
+    return "skipped", None
 
 
 def _exclude_legacy_successes(
@@ -357,23 +528,15 @@ def _exclude_legacy_successes(
     target,
     plans: list[tuple[int, object, str, str]],
 ) -> tuple[list[tuple[int, object, str, str]], int]:
-    """Honor name-keyed successes written before stable identity was added.
-
-    This is deliberately a one-way safety check: legacy success is treated as
-    authoritative, while old failures are not guessed or migrated.
-    """
-    if target.identity_key == target.name:
-        return plans, 0
-    selected = []
-    duplicates = 0
-    for plan in plans:
-        legacy_key = history.key(task_id, run_date, target.name, plan[2])
-        entry = history.entry(legacy_key)
-        if isinstance(entry, dict) and entry.get("status") == "success":
-            duplicates += 1
-            continue
-        selected.append(plan)
-    return selected, duplicates
+    """Backward-compatible wrapper for callers using the pre-identity helper."""
+    return _exclude_legacy_terminal_states(
+        history,
+        task_id,
+        run_date,
+        target,
+        plans,
+        retry_mode=None,
+    )
 
 
 def _persist_target_failure(
@@ -531,11 +694,8 @@ def _enrich_results(results, task, history, run_date: str, artifacts_dir: Path, 
         if target is None:
             enriched.append(result)
             continue
-        entries = []
-        for _, _, _, key in _message_plans(history, task.task_id, run_date, target):
-            entry = history.entry(key)
-            if isinstance(entry, dict):
-                entries.append(entry)
+        plans = _message_plans(history, task.task_id, run_date, target)
+        entries = list(_history_entries_for_target(history, task.task_id, run_date, target, plans))
         attempts = max((_safe_int(entry.get("attempt_count")) for entry in entries), default=0)
         first = min((entry.get("first_attempt_at") for entry in entries if entry.get("first_attempt_at")), default=None)
         last = max((entry.get("last_attempt_at") for entry in entries if entry.get("last_attempt_at")), default=None)

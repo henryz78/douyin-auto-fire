@@ -189,6 +189,11 @@ def _normalize_entry(value: object) -> dict:
         "non_retryable",
     }:
         entry["failure_category"] = "non_retryable"
+    elif entry.get("status") == "failed" and entry.get("failure_category") == "send_unconfirmed":
+        # A legacy or partially-written record may have combined the old
+        # failure label with an uncertain send outcome. Preserve the
+        # fail-closed meaning instead of exposing it to --retry-failed.
+        entry["status"] = "unconfirmed"
     entry["attempt_count"] = max(1, _attempt_count(entry))
     return entry
 

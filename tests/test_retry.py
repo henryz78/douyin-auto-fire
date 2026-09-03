@@ -74,12 +74,162 @@ def test_stable_identity_honors_legacy_name_keyed_success(tmp_path) -> None:
     history.mark_success(legacy_key)
     plans = main_module._message_plans(history, "task", "2026-09-02", target)
 
-    selected, duplicates = main_module._exclude_legacy_successes(
-        history, "task", "2026-09-02", target, plans
+    selected, duplicates = main_module._exclude_legacy_terminal_states(
+        history, "task", "2026-09-02", target, plans, retry_mode=None
     )
 
     assert selected == []
     assert duplicates == 1
+
+
+@pytest.mark.asyncio
+async def test_normal_run_does_not_retry_unconfirmed_or_success_when_duplicates_disabled(monkeypatch, tmp_path) -> None:
+    settings = _settings(tmp_path)
+    task = _task()
+    history, success_key, uncertain_key = _prepare_history(settings, task)
+    history.reserve(success_key)
+    history.mark_success(success_key)
+    history.reserve(uncertain_key)
+    history.mark_unconfirmed(uncertain_key)
+    chat, send = _mock_runtime(monkeypatch, settings, task)
+
+    assert main_module._select_message_plans(
+        history,
+        main_module._message_plans(history, task.task_id, history.run_date(task.timezone), task.targets[0]),
+        dry_run=False,
+        prevent_duplicates=False,
+        retry_mode=None,
+    )[0] == []
+    assert await main_module.run() == 1
+    chat.open_target.assert_not_awaited()
+    send.assert_not_awaited()
+
+
+def test_legacy_unconfirmed_is_only_exposed_to_explicit_manual_retry(tmp_path) -> None:
+    history = History(tmp_path / "history.json")
+    target = Target(
+        name="好友A",
+        sec_uid="sec_1",
+        messages=(Message(type="text", content="你好"),),
+    )
+    message_id = main_module._message_id(0, target.messages[0])
+    legacy_key = history.key("task", "2026-09-02", target.name, message_id)
+    history.reserve(legacy_key)
+    history.mark_unconfirmed(legacy_key)
+    plans = main_module._message_plans(history, "task", "2026-09-02", target)
+
+    normal = main_module._exclude_legacy_terminal_states(
+        history, "task", "2026-09-02", target, plans, retry_mode=None
+    )
+    manual = main_module._include_legacy_retry_plans(
+        history, "task", "2026-09-02", target, plans, [], retry_mode="unconfirmed"
+    )
+
+    assert normal[0] == []
+    assert manual[0][3] == legacy_key
+
+
+def test_identity_aliases_never_create_two_retry_plans(tmp_path) -> None:
+    history = History(tmp_path / "history.json")
+    target = Target(
+        name="好友A",
+        sec_uid="sec_1",
+        messages=(Message(type="text", content="你好"),),
+    )
+    message_id = main_module._message_id(0, target.messages[0])
+    current_key = history.key("task", "2026-09-02", target.identity_key, message_id)
+    legacy_key = history.key("task", "2026-09-02", target.name, message_id)
+    history.reserve(current_key)
+    history.mark_unconfirmed(current_key)
+    history.reserve(legacy_key)
+    history.mark_unconfirmed(legacy_key)
+    plans = main_module._message_plans(history, "task", "2026-09-02", target)
+
+    selected, _ = main_module._select_message_plans(
+        history,
+        plans,
+        dry_run=False,
+        prevent_duplicates=False,
+        retry_mode="unconfirmed",
+    )
+    selected = main_module._include_legacy_retry_plans(
+        history,
+        "task",
+        "2026-09-02",
+        target,
+        plans,
+        selected,
+        retry_mode="unconfirmed",
+    )
+    selected, _ = main_module._exclude_legacy_terminal_states(
+        history,
+        "task",
+        "2026-09-02",
+        target,
+        selected,
+        retry_mode="unconfirmed",
+    )
+
+    assert [plan[3] for plan in selected] == [current_key]
+
+
+def test_stable_success_blocks_legacy_failed_retry(tmp_path) -> None:
+    history = History(tmp_path / "history.json")
+    target = Target(
+        name="好友A",
+        sec_uid="sec_1",
+        messages=(Message(type="text", content="你好"),),
+    )
+    message_id = main_module._message_id(0, target.messages[0])
+    current_key = history.key("task", "2026-09-02", target.identity_key, message_id)
+    legacy_key = history.key("task", "2026-09-02", target.name, message_id)
+    history.reserve(current_key)
+    history.mark_success(current_key)
+    history.reserve(legacy_key)
+    history.mark_failed(legacy_key, "friend_not_found")
+    plans = main_module._message_plans(history, "task", "2026-09-02", target)
+
+    selected = main_module._include_legacy_retry_plans(
+        history,
+        "task",
+        "2026-09-02",
+        target,
+        plans,
+        [],
+        retry_mode="failed",
+    )
+
+    assert selected == []
+
+
+def test_normal_flow_only_auto_retries_policy_allowed_failures(tmp_path) -> None:
+    history = History(tmp_path / "history.json")
+    target = Target(name="好友A", messages=(Message(type="text", content="你好"),))
+    plans = main_module._message_plans(history, "task", "2026-09-02", target)
+
+    history.reserve(plans[0][3])
+    history.mark_failed(plans[0][3], "friend_not_found")
+    selected, _ = main_module._select_message_plans(
+        history,
+        plans,
+        dry_run=False,
+        prevent_duplicates=False,
+        retry_mode=None,
+    )
+
+    assert selected == []
+
+    history.reserve(plans[0][3], allow_success_override=True)
+    history.mark_failed(plans[0][3], "transient_network")
+    selected, _ = main_module._select_message_plans(
+        history,
+        plans,
+        dry_run=False,
+        prevent_duplicates=False,
+        retry_mode=None,
+    )
+
+    assert selected == plans
 
 
 def _mock_runtime(monkeypatch, settings, task):
