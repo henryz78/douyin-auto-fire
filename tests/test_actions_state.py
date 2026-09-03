@@ -1,0 +1,237 @@
+import io
+import json
+import tarfile
+from pathlib import Path, PurePosixPath
+
+import pytest
+
+from app.actions_state import (
+    NoStateFilesError,
+    StateArchiveError,
+    main,
+    prepare_archive,
+    restore_archive,
+)
+
+
+def _history(*, legacy: bool = False) -> dict:
+    if legacy:
+        return {"task:date:friend:message": {"status": "unknown"}}
+    return {"schema_version": 2, "entries": {}}
+
+
+def _account_state(account_id: str = "account1") -> dict:
+    return {
+        "schema_version": 1,
+        "account_id": account_id,
+        "status": "ready",
+        "failure_category": None,
+        "last_failure_at": None,
+        "cooldown_until": None,
+    }
+
+
+def _write_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+
+
+def _make_state_tree(root: Path, *, legacy: bool = False) -> None:
+    _write_json(root / "history.json", _history(legacy=legacy))
+    _write_json(root / "account1" / "account-state.json", _account_state())
+    (root / "run.log").write_text("friend name and diagnostics", encoding="utf-8")
+    _write_json(root / "result.json", {"status": "success"})
+    (root / "screenshots").mkdir(parents=True)
+    (root / "screenshots" / "friend.png").write_bytes(b"not a state file")
+
+
+def test_prepare_allowlists_state_and_writes_atomic_archive(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    archive = tmp_path / "state.tar.gz"
+    _make_state_tree(artifacts)
+
+    included = prepare_archive(
+        artifacts,
+        archive,
+        branch="main",
+        run_id="123",
+        run_attempt="1",
+    )
+
+    assert included == (
+        PurePosixPath("account1/account-state.json"),
+        PurePosixPath("history.json"),
+    )
+    assert archive.is_file()
+    assert not list(tmp_path.glob("state.tar.gz.*.tmp"))
+    with tarfile.open(archive, "r:gz") as handle:
+        names = {member.name for member in handle.getmembers()}
+    assert names == {"manifest.json", "state/history.json", "state/account1/account-state.json"}
+
+
+def test_prepare_accepts_legacy_history_without_making_it_retryable(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    _make_state_tree(artifacts, legacy=True)
+    archive = tmp_path / "state.tar.gz"
+
+    prepare_archive(artifacts, archive, branch="main", run_id="123", run_attempt="1")
+
+    restored = tmp_path / "restored"
+    restore_archive(archive, restored, branch="main")
+    assert json.loads((restored / "history.json").read_text(encoding="utf-8")) == _history(legacy=True)
+
+
+def test_restore_round_trip_and_cleans_staging(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _make_state_tree(source)
+    archive = tmp_path / "state.tar.gz"
+    prepare_archive(source, archive, branch="main", run_id="123", run_attempt="1")
+
+    destination = tmp_path / "artifacts"
+    restored = restore_archive(archive, destination, branch="main")
+
+    assert restored == (
+        PurePosixPath("account1/account-state.json"),
+        PurePosixPath("history.json"),
+    )
+    assert (destination / "history.json").read_bytes() == (source / "history.json").read_bytes()
+    assert (destination / "account1" / "account-state.json").read_bytes() == (
+        source / "account1" / "account-state.json"
+    ).read_bytes()
+    assert not list(tmp_path.glob(".state-restore-*"))
+
+
+def test_prepare_requires_state_and_cli_reports_distinct_exit_code(tmp_path: Path) -> None:
+    with pytest.raises(NoStateFilesError):
+        prepare_archive(
+            tmp_path / "missing",
+            tmp_path / "state.tar.gz",
+            branch="main",
+            run_id="123",
+            run_attempt="1",
+        )
+
+    assert (
+        main(
+            [
+                "prepare",
+                "--artifacts-dir",
+                str(tmp_path / "missing"),
+                "--output",
+                str(tmp_path / "state.tar.gz"),
+                "--branch",
+                "main",
+                "--run-id",
+                "123",
+                "--run-attempt",
+                "1",
+            ]
+        )
+        == 3
+    )
+
+
+def test_restore_rejects_wrong_branch_without_writing_files(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _make_state_tree(source)
+    archive = tmp_path / "state.tar.gz"
+    prepare_archive(source, archive, branch="main", run_id="123", run_attempt="1")
+
+    destination = tmp_path / "artifacts"
+    with pytest.raises(StateArchiveError, match="来源不匹配"):
+        restore_archive(archive, destination, branch="release")
+    assert not destination.exists()
+
+
+def test_restore_rejects_tampered_state_before_writing(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _make_state_tree(source)
+    archive = tmp_path / "state.tar.gz"
+    prepare_archive(source, archive, branch="main", run_id="123", run_attempt="1")
+
+    tampered = tmp_path / "tampered.tar.gz"
+    with tarfile.open(archive, "r:gz") as original, tarfile.open(tampered, "w:gz") as replacement:
+        for member in original.getmembers():
+            data = original.extractfile(member).read() if member.isfile() else None
+            if member.name == "state/history.json":
+                data = b'{"schema_version":2,"entries":{"unexpected":{}}}'
+            replacement.addfile(member, io.BytesIO(data) if data is not None else None)
+
+    destination = tmp_path / "artifacts"
+    with pytest.raises(StateArchiveError, match="校验失败"):
+        restore_archive(tampered, destination, branch="main")
+    assert not destination.exists()
+
+
+def test_restore_rejects_non_regular_and_unallowlisted_members(tmp_path: Path) -> None:
+    manifest = {
+        "schema_version": 1,
+        "workflow": "send.yml",
+        "branch": "main",
+        "run_id": "123",
+        "run_attempt": "1",
+        "created_at": "2026-09-03T00:00:00+00:00",
+        "files": {"history.json": {"sha256": "0" * 64, "size": 0}},
+    }
+    archive = tmp_path / "unsafe.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        manifest_info = tarfile.TarInfo("manifest.json")
+        manifest_bytes = json.dumps(manifest).encode("utf-8")
+        manifest_info.size = len(manifest_bytes)
+        handle.addfile(manifest_info, io.BytesIO(manifest_bytes))
+        link = tarfile.TarInfo("state/history.json")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../../outside"
+        handle.addfile(link)
+
+    with pytest.raises(StateArchiveError, match="非普通文件"):
+        restore_archive(archive, tmp_path / "artifacts", branch="main")
+
+
+def test_prepare_rejects_unsupported_nested_state_path(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    _write_json(artifacts / "account1" / "nested" / "history.json", _history())
+
+    with pytest.raises(StateArchiveError, match="路径不受支持"):
+        prepare_archive(artifacts, tmp_path / "state.tar.gz", branch="main", run_id="123", run_attempt="1")
+
+
+def test_restore_rejects_invalid_state_json(tmp_path: Path) -> None:
+    manifest = {
+        "schema_version": 1,
+        "workflow": "send.yml",
+        "branch": "main",
+        "run_id": "123",
+        "run_attempt": "1",
+        "created_at": "2026-09-03T00:00:00+00:00",
+        "files": {"history.json": {"sha256": "0" * 64, "size": 7}},
+    }
+    archive = tmp_path / "invalid-state.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        manifest_bytes = json.dumps(manifest).encode("utf-8")
+        manifest_info = tarfile.TarInfo("manifest.json")
+        manifest_info.size = len(manifest_bytes)
+        handle.addfile(manifest_info, io.BytesIO(manifest_bytes))
+        state_info = tarfile.TarInfo("state/history.json")
+        state_info.size = 7
+        handle.addfile(state_info, io.BytesIO(b"{bad!!!"))
+
+    with pytest.raises(StateArchiveError, match="校验失败"):
+        restore_archive(archive, tmp_path / "artifacts", branch="main")
+
+
+def test_send_workflow_restores_and_uploads_only_non_dry_run_state() -> None:
+    workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "send.yml").read_text(encoding="utf-8")
+
+    assert "actions: read" in workflow
+    assert "python -m app.actions_state restore" in workflow
+    assert "python -m app.actions_state prepare" in workflow
+    assert "name: Upload persistent send state" in workflow
+    assert "retention-days: 7" in workflow
+    assert 'if: ${{ always() && inputs.dry_run == false }}' in workflow
+    assert "Dry Run：不恢复或写入跨运行状态" in workflow
+    assert "--archive \"${archives[0]}\"" in workflow
+    assert "path: ${{ runner.temp }}/douyin-state.tar.gz" in workflow
+    # The daily schedule must remain disabled until state bootstrap and the
+    # post-persistence review are complete.
+    assert "# schedule:" in workflow

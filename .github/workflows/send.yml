@@ -22,6 +22,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      actions: read
     env:
       DOUYIN_COOKIE: ${{ secrets.DOUYIN_COOKIE }}
       DOUYIN_CONFIG: ${{ secrets.DOUYIN_CONFIG }}
@@ -38,6 +39,71 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Restore persistent send state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "Dry Run：不恢复或写入跨运行状态"
+            exit 0
+          fi
+
+          metadata="$RUNNER_TEMP/douyin-state-artifacts.json"
+          api_url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100"
+          if ! curl --fail --silent --show-error --location \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$api_url" > "$metadata"; then
+            echo "无法读取 GitHub Actions 状态归档列表，已安全停止任务" >&2
+            exit 1
+          fi
+
+          prefix="douyin-state-${GITHUB_REF_NAME}-"
+          artifact_json="$(jq -c --arg prefix "$prefix" '
+            [ .artifacts[]?
+              | select(.expired == false)
+              | select((.name // "") | startswith($prefix))
+            ]
+            | sort_by(.created_at)
+            | last // empty
+          ' "$metadata")"
+          if [[ -z "$artifact_json" || "$artifact_json" == "null" ]]; then
+            echo "未找到当前分支的持久化状态归档；为避免重复发送，正式任务已安全停止" >&2
+            echo "请先通过受控流程建立首个状态归档，再恢复正式定时任务" >&2
+            exit 1
+          fi
+
+          download_url="$(jq -r '.archive_download_url // empty' <<<"$artifact_json")"
+          if [[ -z "$download_url" ]]; then
+            echo "状态归档元数据缺少下载地址，已安全停止任务" >&2
+            exit 1
+          fi
+          zip_path="$RUNNER_TEMP/douyin-state-download.zip"
+          extract_dir="$RUNNER_TEMP/douyin-state-download"
+          rm -rf "$extract_dir"
+          mkdir -p "$extract_dir"
+          if ! curl --fail --silent --show-error --location \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "$download_url" -o "$zip_path"; then
+            echo "无法下载 GitHub Actions 状态归档，已安全停止任务" >&2
+            exit 1
+          fi
+          unzip -q "$zip_path" -d "$extract_dir"
+          mapfile -t archives < <(find "$extract_dir" -type f -name "state.tar.gz" -print)
+          if [[ "${#archives[@]}" -ne 1 ]]; then
+            echo "状态归档内容不符合预期，已安全停止任务" >&2
+            exit 1
+          fi
+          python -m app.actions_state restore \
+            --archive "${archives[0]}" \
+            --artifacts-dir artifacts \
+            --branch "$GITHUB_REF_NAME"
       - run: pip install -r requirements.txt
       - run: python -m playwright install --with-deps chromium
       - name: Write protected configuration
@@ -119,6 +185,37 @@ jobs:
           else
             python run.py
           fi
+      - name: Prepare persistent send state
+        id: persistent_state
+        if: ${{ always() && inputs.dry_run == false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/douyin-state.tar.gz"
+          if python -m app.actions_state prepare \
+            --artifacts-dir artifacts \
+            --output "$archive" \
+            --branch "$GITHUB_REF_NAME" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"; then
+            echo "has_state=true" >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [[ "$status" -eq 3 ]]; then
+              echo "has_state=false" >> "$GITHUB_OUTPUT"
+              echo "没有可持久化的状态文件，保留上一份归档"
+              exit 0
+            fi
+            exit "$status"
+          fi
+      - name: Upload persistent send state
+        if: ${{ always() && inputs.dry_run == false && steps.persistent_state.outputs.has_state == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: douyin-state-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/douyin-state.tar.gz
+          if-no-files-found: error
+          retention-days: 7
       - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
