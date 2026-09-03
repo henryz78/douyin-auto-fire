@@ -20,6 +20,9 @@ STATE_ARCHIVE_SCHEMA_VERSION = 1
 STATE_WORKFLOW = "send.yml"
 STATE_FILENAMES = frozenset({"history.json", "account-state.json"})
 MAX_OUTER_ARCHIVE_BYTES = 64 * 1024 * 1024
+MAX_STATE_ARCHIVE_BYTES = 64 * 1024 * 1024
+MAX_STATE_FILE_BYTES = 8 * 1024 * 1024
+MAX_MANIFEST_BYTES = 1 * 1024 * 1024
 
 
 class StateArchiveError(ValueError):
@@ -51,9 +54,13 @@ def prepare_archive(
 
     records: dict[str, dict[str, int | str]] = {}
     contents: list[tuple[PurePosixPath, bytes]] = []
+    total_size = 0
     for relative in files:
         path = artifacts_dir / Path(*relative.parts)
         data = _read_and_validate_state(path, relative)
+        total_size += len(data)
+        if total_size > MAX_STATE_ARCHIVE_BYTES:
+            raise StateArchiveError("持久化状态归档过大")
         key = relative.as_posix()
         records[key] = {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
         contents.append((relative, data))
@@ -142,10 +149,12 @@ def restore_archive(
         with tarfile.open(archive_path, mode="r:gz") as archive:
             members = archive.getmembers()
             manifest_member = _find_unique_member(members, "manifest.json")
+            if manifest_member.size < 0 or manifest_member.size > MAX_MANIFEST_BYTES:
+                raise StateArchiveError("持久化状态 manifest 过大")
             manifest_raw = archive.extractfile(manifest_member)
             if manifest_raw is None:
                 raise StateArchiveError("持久化状态归档缺少 manifest.json")
-            manifest = _load_manifest(manifest_raw.read(), branch=branch, workflow=workflow)
+            manifest = _load_manifest(manifest_raw.read(MAX_MANIFEST_BYTES + 1), branch=branch, workflow=workflow)
 
             state_members: dict[PurePosixPath, tarfile.TarInfo] = {}
             for member in members:
@@ -163,11 +172,19 @@ def restore_archive(
                 raise StateArchiveError("持久化状态归档文件清单与内容不一致")
 
             contents: dict[PurePosixPath, bytes] = {}
+            total_size = 0
             for relative, member in state_members.items():
+                if member.size < 0 or member.size > MAX_STATE_FILE_BYTES:
+                    raise StateArchiveError(f"持久化状态文件过大: {relative}")
+                total_size += member.size
+                if total_size > MAX_STATE_ARCHIVE_BYTES:
+                    raise StateArchiveError("持久化状态归档解压后过大")
                 stream = archive.extractfile(member)
                 if stream is None:
                     raise StateArchiveError(f"无法读取持久化状态文件: {relative}")
-                data = stream.read()
+                data = stream.read(MAX_STATE_FILE_BYTES + 1)
+                if len(data) > MAX_STATE_FILE_BYTES:
+                    raise StateArchiveError(f"持久化状态文件过大: {relative}")
                 record = records[relative.as_posix()]
                 if record["size"] != len(data) or record["sha256"] != hashlib.sha256(data).hexdigest():
                     raise StateArchiveError(f"持久化状态文件校验失败: {relative}")
@@ -238,7 +255,11 @@ def _state_files(artifacts_dir: Path) -> Iterable[PurePosixPath]:
         if not path.is_file() or path.name not in STATE_FILENAMES:
             continue
         relative = PurePosixPath(path.relative_to(artifacts_dir).as_posix())
-        if len(relative.parts) > 2 or ".." in relative.parts:
+        if (
+            len(relative.parts) > 2
+            or ".." in relative.parts
+            or any("\\" in part or ":" in part for part in relative.parts)
+        ):
             raise StateArchiveError(f"状态文件路径不受支持: {relative}")
         result.append(relative)
     _validate_complete_state_set(result)
@@ -258,11 +279,81 @@ def _validate_complete_state_set(paths: Iterable[PurePosixPath]) -> None:
             raise StateArchiveError(f"状态文件必须同时包含 history.json 和 account-state.json: {label}")
 
 
+def validate_state_layout(
+    artifacts_dir: Path,
+    *,
+    account_ids: Iterable[str] | None = None,
+    allow_empty: bool = False,
+) -> tuple[PurePosixPath, ...]:
+    """Ensure restored state matches the current single/multi-account mode."""
+
+    files = tuple(_state_files(artifacts_dir))
+    if not files:
+        if allow_empty:
+            return ()
+        raise StateArchiveError(f"状态布局缺少 history.json 和 account-state.json: {artifacts_dir}")
+
+    if account_ids is None:
+        expected = {PurePosixPath("history.json"), PurePosixPath("account-state.json")}
+    else:
+        identifiers = tuple(account_ids)
+        expected = set()
+        seen: set[str] = set()
+        for account_id in identifiers:
+            relative = _account_relative_path(account_id)
+            normalized = relative.as_posix()
+            if normalized in seen:
+                raise StateArchiveError("当前账号配置包含重复 id")
+            seen.add(normalized)
+            expected.update({relative / "history.json", relative / "account-state.json"})
+    actual = set(files)
+    if actual != expected:
+        raise StateArchiveError("持久化状态布局与当前单/多账号配置不匹配")
+    return files
+
+
+def _account_relative_path(account_id: str) -> PurePosixPath:
+    if not isinstance(account_id, str) or not account_id.strip():
+        raise StateArchiveError("账号 id 无效，无法校验状态布局")
+    normalized = account_id.strip()
+    relative = PurePosixPath(normalized)
+    if (
+        relative.is_absolute()
+        or relative.parts != (normalized,)
+        or "/" in normalized
+        or "\\" in normalized
+        or ":" in normalized
+        or normalized in {".", ".."}
+    ):
+        raise StateArchiveError(f"账号 id 不能包含路径分隔符: {account_id}")
+    return relative
+
+
+def _load_account_ids(path: Path) -> tuple[str, ...]:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StateArchiveError(f"多账号配置无法读取，无法校验状态布局: {path}") from exc
+    if not isinstance(value, dict) or not isinstance(value.get("accounts"), list):
+        raise StateArchiveError(f"多账号配置缺少 accounts 数组: {path}")
+    result: list[str] = []
+    for item in value["accounts"]:
+        if not isinstance(item, dict) or item.get("enabled", True) is not True:
+            continue
+        result.append(item.get("id"))
+    return tuple(result)
+
+
 def _read_and_validate_state(path: Path, relative: PurePosixPath) -> bytes:
     try:
-        data = path.read_bytes()
+        if path.stat().st_size > MAX_STATE_FILE_BYTES:
+            raise StateArchiveError(f"持久化状态文件过大: {relative}")
+        with path.open("rb") as handle:
+            data = handle.read(MAX_STATE_FILE_BYTES + 1)
     except OSError as exc:
         raise StateArchiveError(f"无法读取状态文件: {path}") from exc
+    if len(data) > MAX_STATE_FILE_BYTES:
+        raise StateArchiveError(f"持久化状态文件过大: {relative}")
     _validate_state_bytes(data, relative)
     return data
 
@@ -325,6 +416,7 @@ def _archive_relative(name: str) -> PurePosixPath:
         or ".." in relative.parts
         or len(relative.parts) > 2
         or relative.name not in STATE_FILENAMES
+        or any("\\" in part or ":" in part for part in relative.parts)
     ):
         raise StateArchiveError(f"持久化状态归档路径无效: {name}")
     return relative
@@ -408,6 +500,11 @@ def _build_parser() -> argparse.ArgumentParser:
     extract = subparsers.add_parser("extract-zip")
     extract.add_argument("--zip", required=True, dest="zip_path", type=Path)
     extract.add_argument("--output", required=True, type=Path)
+
+    layout = subparsers.add_parser("validate-layout")
+    layout.add_argument("--artifacts-dir", required=True, type=Path)
+    layout.add_argument("--accounts-file", type=Path)
+    layout.add_argument("--allow-empty", action="store_true")
     return parser
 
 
@@ -424,8 +521,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "restore":
             restore_archive(args.archive, args.artifacts_dir, branch=args.branch, workflow=args.workflow)
-        else:
+        elif args.command == "extract-zip":
             extract_state_archive(args.zip_path, args.output)
+        else:
+            account_ids = _load_account_ids(args.accounts_file) if args.accounts_file else None
+            validate_state_layout(args.artifacts_dir, account_ids=account_ids, allow_empty=args.allow_empty)
     except NoStateFilesError as exc:
         print(str(exc), file=sys.stderr)
         return 3

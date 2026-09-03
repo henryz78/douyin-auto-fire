@@ -154,9 +154,9 @@ jobs:
           fi
           python -m app.actions_state extract-zip \
             --zip "$zip_path" \
-            --output "$RUNNER_TEMP/douyin-state.tar.gz"
+            --output "$RUNNER_TEMP/state.tar.gz"
           python -m app.actions_state restore \
-            --archive "$RUNNER_TEMP/douyin-state.tar.gz" \
+            --archive "$RUNNER_TEMP/state.tar.gz" \
             --artifacts-dir artifacts \
             --branch "$GITHUB_REF_NAME"
       - run: pip install -r requirements.txt
@@ -232,6 +232,19 @@ jobs:
               encoding="utf-8",
           )
           PY
+      - name: Validate restored state layout
+        if: ${{ inputs.dry_run == false && inputs.bootstrap_state == false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f config/accounts.json ]]; then
+            python -m app.actions_state validate-layout \
+              --artifacts-dir artifacts \
+              --accounts-file config/accounts.json
+          else
+            python -m app.actions_state validate-layout \
+              --artifacts-dir artifacts
+          fi
       - name: Prepare send attempt marker
         if: ${{ inputs.dry_run == false }}
         shell: bash
@@ -260,7 +273,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          archive="$RUNNER_TEMP/douyin-state.tar.gz"
+          archive="$RUNNER_TEMP/state.tar.gz"
           if python -m app.actions_state prepare \
             --artifacts-dir artifacts \
             --output "$archive" \
@@ -282,7 +295,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: douyin-state-${{ steps.state_key.outputs.branch_key }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/douyin-state.tar.gz
+          path: ${{ runner.temp }}/state.tar.gz
           if-no-files-found: error
           retention-days: 7
       - name: Upload diagnostics

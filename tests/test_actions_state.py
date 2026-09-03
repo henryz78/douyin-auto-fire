@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 import pytest
+import app.actions_state as actions_state_module
 
 from app.actions_state import (
     NoStateFilesError,
@@ -15,6 +16,7 @@ from app.actions_state import (
     main,
     prepare_archive,
     restore_archive,
+    validate_state_layout,
 )
 
 
@@ -194,6 +196,31 @@ def test_restore_rejects_non_regular_and_unallowlisted_members(tmp_path: Path) -
         restore_archive(archive, tmp_path / "artifacts", branch="main")
 
 
+def test_restore_rejects_windows_drive_path_in_state_member(tmp_path: Path) -> None:
+    data = json.dumps(_history()).encode("utf-8")
+    manifest = {
+        "schema_version": 1,
+        "workflow": "send.yml",
+        "branch": "main",
+        "run_id": "123",
+        "run_attempt": "1",
+        "created_at": "2026-09-03T00:00:00+00:00",
+        "files": {"C:\\outside/history.json": {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}},
+    }
+    archive = tmp_path / "windows-path.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        manifest_bytes = json.dumps(manifest).encode("utf-8")
+        manifest_info = tarfile.TarInfo("manifest.json")
+        manifest_info.size = len(manifest_bytes)
+        handle.addfile(manifest_info, io.BytesIO(manifest_bytes))
+        state_info = tarfile.TarInfo(r"state/C:\outside/history.json")
+        state_info.size = len(data)
+        handle.addfile(state_info, io.BytesIO(data))
+
+    with pytest.raises(StateArchiveError, match="路径无效"):
+        restore_archive(archive, tmp_path / "artifacts", branch="main")
+
+
 def test_prepare_rejects_unsupported_nested_state_path(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     _write_json(artifacts / "account1" / "nested" / "history.json", _history())
@@ -244,6 +271,107 @@ def test_prepare_supports_single_and_multi_account_state_pairs(tmp_path: Path) -
         PurePosixPath("account1/history.json"),
         PurePosixPath("account1/account-state.json"),
     }
+
+
+def test_validate_state_layout_accepts_matching_single_and_multi_account_modes(tmp_path: Path) -> None:
+    single = tmp_path / "single"
+    _write_json(single / "history.json", _history())
+    _write_json(single / "account-state.json", _account_state("default"))
+    assert validate_state_layout(single) == (
+        PurePosixPath("account-state.json"),
+        PurePosixPath("history.json"),
+    )
+
+    multi = tmp_path / "multi"
+    for account_id in ("account1", "account2"):
+        _write_json(multi / account_id / "history.json", _history())
+        _write_json(multi / account_id / "account-state.json", _account_state(account_id))
+    assert set(validate_state_layout(multi, account_ids=("account1", "account2"))) == {
+        PurePosixPath("account1/account-state.json"),
+        PurePosixPath("account1/history.json"),
+        PurePosixPath("account2/account-state.json"),
+        PurePosixPath("account2/history.json"),
+    }
+
+
+def test_validate_state_layout_rejects_single_multi_switch_and_invalid_account_ids(tmp_path: Path) -> None:
+    single = tmp_path / "single"
+    _write_json(single / "history.json", _history())
+    _write_json(single / "account-state.json", _account_state("default"))
+    with pytest.raises(StateArchiveError, match="布局与当前单/多账号配置不匹配"):
+        validate_state_layout(single, account_ids=("account1",))
+
+    multi = tmp_path / "multi"
+    _write_json(multi / "account1" / "history.json", _history())
+    _write_json(multi / "account1" / "account-state.json", _account_state("account1"))
+    with pytest.raises(StateArchiveError, match="布局与当前单/多账号配置不匹配"):
+        validate_state_layout(multi)
+    with pytest.raises(StateArchiveError, match="路径分隔符"):
+        validate_state_layout(single, account_ids=("account/1",))
+
+
+def test_validate_state_layout_allows_explicit_empty_bootstrap(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    with pytest.raises(StateArchiveError, match="缺少 history.json"):
+        validate_state_layout(artifacts)
+    assert validate_state_layout(artifacts, allow_empty=True) == ()
+
+
+def test_validate_state_layout_cli_uses_enabled_account_ids_and_rejects_bad_ids(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    _write_json(artifacts / "account1" / "history.json", _history())
+    _write_json(artifacts / "account1" / "account-state.json", _account_state("account1"))
+    accounts = tmp_path / "accounts.json"
+    _write_json(
+        accounts,
+        {"accounts": [{"id": "account1", "enabled": True}, {"id": "account2", "enabled": False}]},
+    )
+    assert main(
+        [
+            "validate-layout",
+            "--artifacts-dir",
+            str(artifacts),
+            "--accounts-file",
+            str(accounts),
+        ]
+    ) == 0
+
+    _write_json(accounts, {"accounts": [{"id": ["not-a-string"], "enabled": True}]})
+    assert main(
+        [
+            "validate-layout",
+            "--artifacts-dir",
+            str(artifacts),
+            "--accounts-file",
+            str(accounts),
+        ]
+    ) == 2
+
+
+def test_restore_rejects_oversized_state_member_before_reading_payload(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(actions_state_module, "MAX_STATE_FILE_BYTES", 4)
+    oversized = 5
+    manifest = {
+        "schema_version": 1,
+        "workflow": "send.yml",
+        "branch": "main",
+        "run_id": "123",
+        "run_attempt": "1",
+        "created_at": "2026-09-03T00:00:00+00:00",
+        "files": {"history.json": {"sha256": "0" * 64, "size": oversized}},
+    }
+    archive = tmp_path / "oversized.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        manifest_bytes = json.dumps(manifest).encode("utf-8")
+        manifest_info = tarfile.TarInfo("manifest.json")
+        manifest_info.size = len(manifest_bytes)
+        handle.addfile(manifest_info, io.BytesIO(manifest_bytes))
+        state_info = tarfile.TarInfo("state/history.json")
+        state_info.size = oversized
+        handle.addfile(state_info, io.BytesIO(b"xxxxx"))
+
+    with pytest.raises(StateArchiveError, match="状态文件过大"):
+        restore_archive(archive, tmp_path / "artifacts", branch="main")
 
 
 def test_restore_rejects_archive_with_only_one_state_file(tmp_path: Path) -> None:
@@ -383,8 +511,12 @@ def test_send_workflow_restores_and_uploads_only_non_dry_run_state() -> None:
     assert "retention-days: 7" in workflow
     assert 'if: ${{ always() && inputs.dry_run == false }}' in workflow
     assert "Dry Run：不恢复或写入跨运行状态" in workflow
-    assert "--archive \"$RUNNER_TEMP/douyin-state.tar.gz\"" in workflow
-    assert "path: ${{ runner.temp }}/douyin-state.tar.gz" in workflow
+    assert "Validate restored state layout" in workflow
+    assert "validate-layout" in workflow
+    assert "--output \"$RUNNER_TEMP/state.tar.gz\"" in workflow
+    assert "--archive \"$RUNNER_TEMP/state.tar.gz\"" in workflow
+    assert "path: ${{ runner.temp }}/state.tar.gz" in workflow
+    assert "douyin-state.tar.gz" not in workflow
     # The daily schedule must remain disabled until state bootstrap and the
     # post-persistence review are complete.
     assert "# schedule:" in workflow
