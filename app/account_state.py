@@ -20,6 +20,14 @@ class AccountCooldownError(RuntimeError):
         super().__init__(f"账号仍处于 {category} 冷却期，截止 {cooldown_until}")
 
 
+class AccountLoginRequiredError(RuntimeError):
+    failure_category = "login_required"
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        super().__init__(f"账号登录态已失效，请更新凭证后手动重置账号状态: {path}")
+
+
 class AccountState:
     def __init__(self, path: Path, account_id: str) -> None:
         self.path = path
@@ -27,8 +35,14 @@ class AccountState:
         self.data = self._load()
 
     def ensure_runnable(self, now: datetime | None = None) -> None:
+        status = self.data.get("status")
         category = self.data.get("failure_category")
         cooldown_until = self.data.get("cooldown_until")
+        if status == "login_required":
+            # Do not repeatedly launch a known-invalid account on scheduled
+            # runs.  Updating credentials must be accompanied by an explicit
+            # state reset (mark_ready or removing the state file).
+            raise AccountLoginRequiredError(self.path)
         if category not in {"risk_control", "rate_limited"}:
             return
         if not isinstance(cooldown_until, str):
@@ -97,9 +111,21 @@ class AccountState:
             raise ValueError(f"账号状态文件与当前账号不匹配: {self.path}")
         if value.get("status") not in {"ready", "login_required", "blocked"}:
             raise ValueError(f"账号状态 status 无效: {self.path}")
+        status = value["status"]
         category = value.get("failure_category")
         if category is not None and category not in RETRY_POLICIES:
             raise ValueError(f"账号状态 failure_category 无效: {self.path}")
+        cooldown_until = value.get("cooldown_until")
+        if status == "ready":
+            if category is not None or cooldown_until is not None:
+                raise ValueError(f"账号状态 status/failure_category 组合无效: {self.path}")
+        elif status == "login_required":
+            if category != "login_required" or cooldown_until is not None:
+                raise ValueError(f"账号状态 status/failure_category 组合无效: {self.path}")
+        elif category not in {"browser_startup", "risk_control", "rate_limited"}:
+            raise ValueError(f"账号状态 status/failure_category 组合无效: {self.path}")
+        elif category == "browser_startup" and cooldown_until is not None:
+            raise ValueError(f"账号状态 cooldown_until 组合无效: {self.path}")
         return value
 
     def _save(self) -> None:

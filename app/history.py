@@ -120,6 +120,11 @@ class History:
         error: str | None = None,
     ) -> None:
         previous = self.entry(key) or {}
+        # A strong success is terminal for this message identity.  Keep the
+        # durable record authoritative even if a late exception path tries to
+        # mark the same key failed/unconfirmed/skipped.
+        if previous.get("status") == "success":
+            return
         now = _now()
         self.entries[key] = {
             **previous,
@@ -147,7 +152,7 @@ class History:
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
             if not isinstance(value, dict):
-                return {}
+                raise ValueError(f"发送历史格式无效，为避免重复发送，任务已停止: {self.path}")
             if "schema_version" in value:
                 version = value.get("schema_version")
                 entries = value.get("entries")
@@ -291,6 +296,8 @@ def _existing_lock_is_stale(path: Path) -> bool:
             not isinstance(stored_identity, str) or not stored_identity
         ):
             raise AlreadyRunningError(f"锁文件损坏，无法可靠判断是否失效: {path}")
+    if pid <= 0:
+        raise AlreadyRunningError(f"锁文件损坏，无法可靠判断是否失效: {path}")
 
     alive, current_identity = _process_identity(pid)
     if alive is False:
@@ -305,12 +312,54 @@ def _existing_lock_is_stale(path: Path) -> bool:
 
 
 def _remove_confirmed_stale_lock(path: Path) -> None:
-    # Re-evaluate immediately before deletion. If another process replaced the
-    # lock, the second check will fail closed instead of deleting its live lock.
-    if not _existing_lock_is_stale(path):
-        raise AlreadyRunningError(f"锁状态在恢复期间发生变化，拒绝并发运行: {path}")
+    # Claim the exact directory entry before validating/removing it.  A plain
+    # "check then unlink" is racy: another process may create a fresh lock
+    # between those operations.  rename is atomic within a filesystem, and the
+    # quarantine name is unique, so cleanup can only touch the entry we claimed.
+    claimed = _claim_stale_lock(path)
+    if claimed is None:
+        return
     try:
-        path.unlink()
+        if not _existing_lock_is_stale(claimed):
+            _restore_claimed_lock(claimed, path)
+            raise AlreadyRunningError(f"锁状态在恢复期间发生变化，拒绝并发运行: {path}")
+    except Exception:
+        # Preserve malformed/unverifiable/live locks.  If a replacement already
+        # occupies the canonical path, the no-overwrite restore simply leaves
+        # both entries intact; in either case we fail closed.
+        if claimed.exists():
+            _restore_claimed_lock(claimed, path)
+        raise
+    try:
+        claimed.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _claim_stale_lock(path: Path) -> Path | None:
+    claimed = path.with_name(f"{path.name}.stale.{uuid.uuid4().hex}")
+    try:
+        os.rename(path, claimed)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise AlreadyRunningError(f"无法安全接管现有锁，拒绝并发运行: {path}") from exc
+    return claimed
+
+
+def _restore_claimed_lock(claimed: Path, path: Path) -> None:
+    """Restore a claimed lock without overwriting a replacement entry."""
+    try:
+        # Hard-link creation is atomic and fails if another process has already
+        # recreated the destination.  Unlike os.replace/os.rename, it can never
+        # overwrite that newer lock.
+        os.link(claimed, path)
+    except FileExistsError:
+        return
+    except OSError as exc:
+        raise AlreadyRunningError(f"无法安全恢复现有锁，拒绝并发运行: {path}") from exc
+    try:
+        claimed.unlink()
     except FileNotFoundError:
         pass
 
@@ -329,7 +378,7 @@ def _remove_owned_lock(path: Path, run_id: str) -> None:
 
 def _process_identity(pid: int) -> tuple[bool | None, str | None]:
     if pid <= 0:
-        return False, None
+        return None, None
     if os.name == "nt":
         return _windows_process_identity(pid)
     proc_stat = Path(f"/proc/{pid}/stat")

@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.douyin import DouyinChat, PageOperationError
+from app.douyin import AmbiguousTargetError, DouyinChat, PageOperationError
 from app.models import Message, Target
 from app.selectors import CHAT_PANEL_MARKERS, MESSAGE_INPUTS
 
@@ -111,6 +111,40 @@ async def test_search_result_keeps_normal_exact_match_working() -> None:
     result = await DouyinChat(page)._search_result("好友A")
 
     assert result is buttons[0]
+
+
+@pytest.mark.asyncio
+async def test_search_result_rejects_multiple_exact_matches() -> None:
+    page, _buttons = _search_page(["好友A", "好友A"])
+
+    with pytest.raises(AmbiguousTargetError, match="多个同名好友"):
+        await DouyinChat(page)._search_result("好友A")
+
+
+@pytest.mark.asyncio
+async def test_open_target_does_not_fallback_after_identity_ambiguity() -> None:
+    page = MagicMock()
+    page.wait_for_timeout = AsyncMock()
+    chat = DouyinChat(page)
+    calls: list[str] = []
+
+    async def ambiguous(name: str, expected_names=None) -> None:
+        calls.append(name)
+        raise AmbiguousTargetError("多个同名好友")
+
+    chat._open_target_once = ambiguous
+    target = Target(
+        name="好友A",
+        nickname="旧昵称",
+        sec_uid="sec_1",
+        messages=(Message(type="text", content="你好"),),
+    )
+
+    with pytest.raises(AmbiguousTargetError):
+        await chat.open_target(target, retries=2)
+
+    assert calls == ["sec_1"]
+    page.wait_for_timeout.assert_not_awaited()
 
 
 @pytest.mark.asyncio

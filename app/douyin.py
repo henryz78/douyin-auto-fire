@@ -13,6 +13,10 @@ class PageOperationError(RuntimeError):
     pass
 
 
+class AmbiguousTargetError(PageOperationError):
+    """Several exact search results matched; refusing to guess a recipient."""
+
+
 RETRY_DELAY_MS = 3_000
 
 
@@ -41,6 +45,11 @@ class DouyinChat:
                         await self._open_target_once(candidate)
                     return
                 except Exception as exc:
+                    if isinstance(exc, AmbiguousTargetError):
+                        # Trying another alias would turn an identity ambiguity
+                        # into a guess.  Stop immediately and let the caller
+                        # record a non-retryable failure.
+                        raise
                     last_error = exc
                     if attempt < retries:
                         await self.page.wait_for_timeout(RETRY_DELAY_MS)
@@ -88,6 +97,7 @@ class DouyinChat:
         # an exact name; only if none is found does pass 2 accept a group member
         # count suffix like "4161(7)" for target "4161". This ordering guarantees
         # "test" never returns "test(7)" or "test1".
+        exact_matches: list[Locator] = []
         for index in range(await search_items.count()):
             item = search_items.nth(index)
             name_locator = await _visible_exact_text_locator(item, name_selectors, name)
@@ -96,10 +106,15 @@ class DouyinChat:
             button = item.locator('[class*="SearchPanelitemchat_btn"]').first
             try:
                 if await button.count() and await button.is_visible():
-                    return button
+                    exact_matches.append(button)
             except Exception:
                 continue
+        if len(exact_matches) > 1:
+            raise AmbiguousTargetError("搜索结果存在多个同名好友，拒绝猜测收件人")
+        if exact_matches:
+            return exact_matches[0]
 
+        group_matches: list[Locator] = []
         for index in range(await search_items.count()):
             item = search_items.nth(index)
             name_locator = await _visible_group_text_locator(item, name_selectors, name)
@@ -108,9 +123,13 @@ class DouyinChat:
             button = item.locator('[class*="SearchPanelitemchat_btn"]').first
             try:
                 if await button.count() and await button.is_visible():
-                    return button
+                    group_matches.append(button)
             except Exception:
                 continue
+        if len(group_matches) > 1:
+            raise AmbiguousTargetError("搜索结果存在多个同名群聊，拒绝猜测收件人")
+        if group_matches:
+            return group_matches[0]
 
         # The nickname node can be hidden while its conversation row is visible.
         # Locate and click the complete row instead of relying on text visibility.
@@ -127,6 +146,7 @@ class DouyinChat:
             '[class*="conversation-item-title"]',
             '[class*="conversation-item-Title"]',
         )
+        exact_rows: list[Locator] = []
         for selector in row_selectors:
             rows = self.page.locator(selector)
             for index in range(await rows.count()):
@@ -136,11 +156,16 @@ class DouyinChat:
                     continue
                 try:
                     if await row.is_visible():
-                        return row
+                        exact_rows.append(row)
                 except Exception:
                     continue
+        if len(exact_rows) > 1:
+            raise AmbiguousTargetError("会话列表存在多个同名好友，拒绝猜测收件人")
+        if exact_rows:
+            return exact_rows[0]
 
         # Second-phase group suffix over conversation rows (same priority rule).
+        group_rows: list[Locator] = []
         for selector in row_selectors:
             rows = self.page.locator(selector)
             for index in range(await rows.count()):
@@ -150,15 +175,20 @@ class DouyinChat:
                     continue
                 try:
                     if await row.is_visible():
-                        return row
+                        group_rows.append(row)
                 except Exception:
                     continue
+        if len(group_rows) > 1:
+            raise AmbiguousTargetError("会话列表存在多个同名群聊，拒绝猜测收件人")
+        if group_rows:
+            return group_rows[0]
 
         # Some Douyin builds render the title itself as hidden, but keep a visible
         # ancestor as the actionable result. Find that ancestor from the hidden title.
         # This hidden-title fallback stays STRICT exact only: a hidden stale name
         # node (group or plain) must never be trusted to resolve the recipient.
         hidden_titles = self.page.locator('[class*="conversationConversationItemtitle"]')
+        hidden_rows: list[Locator] = []
         for index in range(await hidden_titles.count()):
             title = hidden_titles.nth(index)
             if not await _text_equals(title, name):
@@ -167,7 +197,11 @@ class DouyinChat:
                 "xpath=ancestor::*[contains(@class, 'conversationConversationItem')][1]"
             )
             if await row.count() and await row.is_visible():
-                return row
+                hidden_rows.append(row)
+        if len(hidden_rows) > 1:
+            raise AmbiguousTargetError("会话列表存在多个同名好友，拒绝猜测收件人")
+        if hidden_rows:
+            return hidden_rows[0]
 
         return None
 

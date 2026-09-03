@@ -82,6 +82,55 @@ def test_stable_identity_honors_legacy_name_keyed_success(tmp_path) -> None:
     assert duplicates == 1
 
 
+def test_stable_identity_honors_legacy_nickname_success_after_rename(tmp_path) -> None:
+    history = History(tmp_path / "history.json")
+    target = Target(
+        name="新昵称",
+        nickname="旧昵称",
+        sec_uid="sec_1",
+        messages=(Message(type="text", content="你好"),),
+    )
+    message_id = main_module._message_id(0, target.messages[0])
+    legacy_key = history.key("task", "2026-09-02", "旧昵称", message_id)
+    history.reserve(legacy_key)
+    history.mark_success(legacy_key)
+    plans = main_module._message_plans(history, "task", "2026-09-02", target)
+
+    selected, duplicates = main_module._exclude_legacy_terminal_states(
+        history, "task", "2026-09-02", target, plans, retry_mode=None
+    )
+
+    assert selected == []
+    assert duplicates == 1
+
+
+def test_legacy_nickname_failure_never_authorizes_retry_after_rename(tmp_path) -> None:
+    history = History(tmp_path / "history.json")
+    target = Target(
+        name="新昵称",
+        nickname="旧昵称",
+        sec_uid="sec_1",
+        messages=(Message(type="text", content="你好"),),
+    )
+    message_id = main_module._message_id(0, target.messages[0])
+    legacy_key = history.key("task", "2026-09-02", "旧昵称", message_id)
+    history.reserve(legacy_key)
+    history.mark_failed(legacy_key, "friend_not_found")
+    plans = main_module._message_plans(history, "task", "2026-09-02", target)
+
+    selected = main_module._include_legacy_retry_plans(
+        history,
+        "task",
+        "2026-09-02",
+        target,
+        plans,
+        [],
+        retry_mode="failed",
+    )
+
+    assert selected == []
+
+
 @pytest.mark.asyncio
 async def test_normal_run_does_not_retry_unconfirmed_or_success_when_duplicates_disabled(monkeypatch, tmp_path) -> None:
     settings = _settings(tmp_path)
@@ -232,6 +281,31 @@ def test_normal_flow_only_auto_retries_policy_allowed_failures(tmp_path) -> None
     assert selected == plans
 
 
+def test_target_open_failure_increments_existing_failed_attempt(tmp_path) -> None:
+    history = History(tmp_path / "history.json")
+    target = Target(name="好友A", messages=(Message(type="text", content="你好"),))
+    plans = main_module._message_plans(history, "task", "2026-09-02", target)
+    key = plans[0][3]
+    history.reserve(key)
+    history.mark_failed(key, "transient_network", "首次打开失败")
+
+    main_module._persist_target_failure(
+        history,
+        plans,
+        current_key=None,
+        category="transient_network",
+        error="再次打开失败",
+        target_key=target.identity_key,
+        display_name=target.name,
+        opened=False,
+    )
+
+    entry = history.entry(key)
+    assert entry["status"] == "failed"
+    assert entry["attempt_count"] == 2
+    assert entry["error"] == "再次打开失败"
+
+
 def _mock_runtime(monkeypatch, settings, task):
     page = MagicMock()
     session = SimpleNamespace(page=page, context=MagicMock())
@@ -289,6 +363,25 @@ async def test_retry_failed_never_selects_unconfirmed(monkeypatch, tmp_path) -> 
     assert await main_module.run(retry_mode="failed") == 0
 
     chat.open_target.assert_not_awaited()
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dry_run_target_failure_does_not_change_history_or_success(monkeypatch, tmp_path) -> None:
+    settings = _settings(tmp_path)
+    task = _task()
+    history, success_key, _ = _prepare_history(settings, task)
+    history.reserve(success_key)
+    history.mark_success(success_key)
+    before = history.entry(success_key)
+    chat, send = _mock_runtime(monkeypatch, settings, task)
+    chat.open_target.side_effect = PageOperationError("搜索不到目标好友")
+
+    assert await main_module.run(dry_run=True) == 1
+
+    reloaded = History(settings.artifacts_dir / "history.json")
+    assert reloaded.entry(success_key) == before
+    assert len(reloaded.entries) == 1
     send.assert_not_awaited()
 
 

@@ -1,3 +1,5 @@
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -103,11 +105,39 @@ def test_reserve_never_overwrites_success_even_with_legacy_override_flag(tmp_pat
     assert history.entry(key)["status"] == "success"
 
 
+@pytest.mark.parametrize("status", ["failed", "unconfirmed", "skipped"])
+def test_terminal_success_cannot_be_overwritten_by_late_transition(tmp_path: Path, status: str) -> None:
+    history = History(tmp_path / "history.json")
+    key = "task:date:friend:message"
+    history.reserve(key)
+    history.mark_success(key)
+    before = history.entry(key)
+
+    if status == "failed":
+        history.mark_failed(key, "friend_not_found", "late error")
+    elif status == "unconfirmed":
+        history.mark_unconfirmed(key, "late uncertainty")
+    else:
+        history.mark_skipped(key, "late skip")
+
+    assert history.entry(key) == before
+    assert History(tmp_path / "history.json").entry(key) == before
+
+
 def test_corrupt_history_fails_closed(tmp_path: Path) -> None:
     path = tmp_path / "history.json"
     path.write_text("{broken", encoding="utf-8")
 
     with pytest.raises(ValueError, match="发送历史损坏"):
+        History(path)
+
+
+@pytest.mark.parametrize("raw", ["[]", "null", '"not-an-object"'])
+def test_non_object_history_root_fails_closed(tmp_path: Path, raw: str) -> None:
+    path = tmp_path / "history.json"
+    path.write_text(raw, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="发送历史格式无效"):
         History(path)
 
 
@@ -193,3 +223,50 @@ def test_run_lock_rejects_malformed_process_identity(tmp_path: Path) -> None:
     with pytest.raises(AlreadyRunningError, match="损坏"):
         with run_lock(path):
             pass
+
+
+@pytest.mark.parametrize("pid", [0, -1])
+def test_run_lock_rejects_non_positive_pid(tmp_path: Path, pid: int) -> None:
+    path = tmp_path / "run.lock"
+    path.write_text(json.dumps({"pid": pid, "run_id": "old"}), encoding="utf-8")
+
+    with pytest.raises(AlreadyRunningError, match="损坏"):
+        with run_lock(path):
+            pass
+
+    assert path.exists()
+
+
+def test_run_lock_does_not_delete_replacement_during_stale_recovery(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "run.lock"
+    path.write_text(json.dumps({"pid": 999999, "run_id": "old"}), encoding="utf-8")
+    original_is_stale = history_module._existing_lock_is_stale
+    current_pid = os.getpid()
+    current_identity = history_module._process_identity(current_pid)[1]
+    calls = 0
+
+    def replace_after_initial_check(candidate: Path) -> bool:
+        nonlocal calls
+        if candidate == path and calls == 0:
+            calls += 1
+            path.write_text(
+                json.dumps(
+                    {
+                        "pid": current_pid,
+                        "process_started_at": current_identity,
+                        "run_id": "replacement",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return True
+        return original_is_stale(candidate)
+
+    monkeypatch.setattr(history_module, "_existing_lock_is_stale", replace_after_initial_check)
+
+    with pytest.raises(AlreadyRunningError):
+        with run_lock(path, run_id="new"):
+            pass
+
+    assert json.loads(path.read_text(encoding="utf-8"))["run_id"] == "replacement"
+    assert not list(tmp_path.glob("run.lock.stale.*"))

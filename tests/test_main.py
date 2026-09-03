@@ -224,3 +224,39 @@ async def test_telegram_notification_failure_does_not_raise_or_log_token(monkeyp
 
     assert "Telegram 通知发送失败" in caplog.text
     assert "SECRET_TOKEN" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_notification_failure_does_not_log_webhook_or_signature(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    webhook = "https://oapi.dingtalk.com/robot/send?access_token=WEBHOOK_SECRET"
+    secret = "SIGNATURE_SECRET"
+    settings = Settings(
+        task_config_path=tmp_path / "config.json",
+        storage_state=None,
+        cookie="[]",
+        headless=True,
+        browser_path=None,
+        artifacts_dir=tmp_path / "artifacts",
+        trace=False,
+        dingtalk_webhook=webhook,
+        dingtalk_secret=secret,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "send_dingtalk_notification",
+        AsyncMock(side_effect=RuntimeError(f"POST {webhook} sign={secret}")),
+    )
+
+    await main_module._notify_dingtalk(
+        settings,
+        "daily-streak",
+        False,
+        [main_module.TargetResult(target="好友A", status="success", sent=1)],
+        [],
+    )
+
+    assert "钉钉通知发送失败" in caplog.text
+    assert "WEBHOOK_SECRET" not in caplog.text
+    assert "SIGNATURE_SECRET" not in caplog.text

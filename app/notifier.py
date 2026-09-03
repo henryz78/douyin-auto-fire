@@ -63,10 +63,11 @@ def build_telegram_message(
     retry_mode: str | None = None,
 ) -> str:
     successes = [result for result in results if result.status == "success"]
+    skipped = [result for result in results if result.status in {"duplicate", "skipped"}]
     unconfirmed = [result for result in results if result.status == "unconfirmed"]
     account_failures = [result for result in results if _is_account_failure(result)]
     failures = [result for result in results if result.status == "failed" and result not in account_failures]
-    status = _telegram_status(successes, failures, unconfirmed, account_failures, retry_mode)
+    status = _telegram_status(successes, failures, unconfirmed, account_failures, retry_mode, skipped=skipped)
     mode = "Dry Run（未发送消息）" if dry_run else "正式运行"
     finished = (finished_at or datetime.now(timezone.utc)).astimezone(NOTIFY_TIMEZONE).strftime(
         "%Y-%m-%d %H:%M:%S %z"
@@ -78,7 +79,7 @@ def build_telegram_message(
         [
             f"模式：{mode}",
             f"完成时间：{finished}",
-            f"结果：成功 {len(successes)}，失败 {len(failures)}，未确认 {len(unconfirmed)}，账号故障 {len(account_failures)}",
+            f"结果：成功 {len(successes)}，失败 {len(failures)}，未确认 {len(unconfirmed)}，账号故障 {len(account_failures)}，跳过 {len(skipped)}",
             "",
             f"成功好友（{len(successes)}）：",
         ]
@@ -89,6 +90,10 @@ def build_telegram_message(
             lines.append(f"- {_telegram_text(result.target, limit=100)}（{detail}）")
     else:
         lines.append("- 无")
+    if skipped:
+        lines.extend(["", f"跳过目标（{len(skipped)}，没有新发送）："])
+        for result in skipped:
+            lines.append(f"- {_telegram_text(result.target, limit=100)}")
 
     lines.extend(["", f"失败目标（{len(failures)}）："])
     if failures:
@@ -137,10 +142,11 @@ def build_dingtalk_markdown(
     retry_mode: str | None = None,
 ) -> tuple[str, str]:
     successes = [result for result in results if result.status == "success"]
+    skipped = [result for result in results if result.status in {"duplicate", "skipped"}]
     unconfirmed = [result for result in results if result.status == "unconfirmed"]
     account_failures = [result for result in results if _is_account_failure(result)]
     failures = [result for result in results if result.status == "failed" and result not in account_failures]
-    status = _dingtalk_status(successes, failures, unconfirmed, account_failures, retry_mode)
+    status = _dingtalk_status(successes, failures, unconfirmed, account_failures, retry_mode, skipped=skipped)
     mode = "检查模式（未发送消息）" if dry_run else "正式发送"
     finished = (finished_at or datetime.now(timezone.utc)).astimezone(NOTIFY_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S %z")
     title = f"抖音自动发送：{status}"
@@ -150,7 +156,7 @@ def build_dingtalk_markdown(
         f"> **任务**：{_markdown_text(task_id, limit=100)}  ",
         f"> **模式**：{mode}  ",
         f"> **完成时间**：{finished}  ",
-        f"> **结果**：成功 {len(successes)}，失败 {len(failures)}，未确认 {len(unconfirmed)}，账号故障 {len(account_failures)}",
+        f"> **结果**：成功 {len(successes)}，失败 {len(failures)}，未确认 {len(unconfirmed)}，账号故障 {len(account_failures)}，跳过 {len(skipped)}",
         "",
         f"#### 成功名单（{len(successes)}）",
     ]
@@ -162,6 +168,13 @@ def build_dingtalk_markdown(
             lines.append(f"- 其余 {len(successes) - MAX_RESULTS_PER_SECTION} 人已省略")
     else:
         lines.append("无")
+
+    if skipped:
+        lines.extend(["", f"#### 跳过目标（{len(skipped)}，没有新发送）"])
+        for index, result in enumerate(skipped[:MAX_RESULTS_PER_SECTION], 1):
+            lines.append(f"{index}. **{_markdown_text(result.target, limit=100)}**")
+        if len(skipped) > MAX_RESULTS_PER_SECTION:
+            lines.append(f"- 其余 {len(skipped) - MAX_RESULTS_PER_SECTION} 人已省略")
 
     if unconfirmed:
         lines.extend(["", f"#### 未确认（{len(unconfirmed)}，不会自动重发）"])
@@ -207,7 +220,8 @@ def _is_account_failure(result: TargetResult) -> bool:
     return result.failure_category in {"login_required", "risk_control", "rate_limited", "browser_startup"}
 
 
-def _telegram_status(successes, failures, unconfirmed, account_failures, retry_mode: str | None) -> str:
+def _telegram_status(successes, failures, unconfirmed, account_failures, retry_mode: str | None, skipped=None) -> str:
+    skipped = skipped or []
     if account_failures:
         return "⛔ 抖音任务发生账号级故障"
     if unconfirmed:
@@ -218,10 +232,13 @@ def _telegram_status(successes, failures, unconfirmed, account_failures, retry_m
         return "❌ 抖音任务存在失败"
     if retry_mode and successes:
         return "✅ 抖音任务重试后恢复成功"
+    if skipped and not successes:
+        return "⚪ 抖音任务无新发送（已跳过）"
     return "✅ 抖音任务成功"
 
 
-def _dingtalk_status(successes, failures, unconfirmed, account_failures, retry_mode: str | None) -> str:
+def _dingtalk_status(successes, failures, unconfirmed, account_failures, retry_mode: str | None, skipped=None) -> str:
+    skipped = skipped or []
     if account_failures:
         return "账号级故障"
     if unconfirmed:
@@ -232,6 +249,8 @@ def _dingtalk_status(successes, failures, unconfirmed, account_failures, retry_m
         return "存在失败"
     if retry_mode and successes:
         return "重试后恢复成功"
+    if skipped and not successes:
+        return "无新发送（已跳过）"
     return "全部成功"
 
 
@@ -294,7 +313,7 @@ def _github_run_url() -> str | None:
 
 
 def _markdown_text(value: str, limit: int | None = None) -> str:
-    text = " ".join(value.splitlines()).strip()
+    text = _mask_configured_secrets(" ".join(str(value).splitlines()).strip())
     if limit is not None and len(text) > limit:
         text = f"{text[:limit - 3]}..."
     for character in ("\\", "`", "*", "_", "[", "]", "#", ">", "|"):
@@ -303,7 +322,13 @@ def _markdown_text(value: str, limit: int | None = None) -> str:
 
 
 def _telegram_text(value: str, limit: int | None = None) -> str:
-    text = " ".join(str(value).splitlines()).strip()
+    text = _mask_configured_secrets(" ".join(str(value).splitlines()).strip())
+    if limit is not None and len(text) > limit:
+        text = f"{text[: max(0, limit - 3)]}..."
+    return text
+
+
+def _mask_configured_secrets(text: str) -> str:
     for name in (
         "DOUYIN_COOKIE",
         "DOUYIN_STORAGE_STATE",
@@ -318,8 +343,6 @@ def _telegram_text(value: str, limit: int | None = None) -> str:
         secret = os.getenv(name)
         if secret:
             text = text.replace(secret, "[已隐藏]")
-    if limit is not None and len(text) > limit:
-        text = f"{text[: max(0, limit - 3)]}..."
     return text
 
 

@@ -149,6 +149,21 @@ def test_notifications_distinguish_unconfirmed_account_failure_and_recovery() ->
     assert "重试后恢复成功" in recovered
 
 
+def test_notifications_distinguish_all_skipped_from_success() -> None:
+    results = [
+        TargetResult(target="好友A", status="duplicate"),
+        TargetResult(target="好友B", status="skipped"),
+    ]
+
+    telegram = build_telegram_message("task", False, results)
+    title, markdown = build_dingtalk_markdown("task", False, results, [])
+
+    assert "无新发送（已跳过）" in telegram
+    assert "跳过目标（2" in telegram
+    assert title == "抖音自动发送：无新发送（已跳过）"
+    assert "跳过目标（2" in markdown
+
+
 def test_telegram_dry_run_message_uses_verification_detail() -> None:
     message = build_telegram_message(
         "daily-streak",
@@ -173,6 +188,20 @@ def test_telegram_message_redacts_configured_secrets(monkeypatch) -> None:
     assert "COOKIE_SECRET" not in message
     assert "PROXY_SECRET" not in message
     assert message.count("[已隐藏]") == 2
+
+
+def test_dingtalk_markdown_redacts_configured_secrets(monkeypatch) -> None:
+    monkeypatch.setenv("DINGTALK_WEBHOOK", "https://example.test/robot?access_token=WEBHOOK_SECRET")
+    monkeypatch.setenv("DINGTALK_SECRET", "SIGN_SECRET")
+    _, markdown = build_dingtalk_markdown(
+        "task",
+        False,
+        [TargetResult(target="好友A", status="failed", error="WEBHOOK_SECRET SIGN_SECRET")],
+        [],
+    )
+
+    assert "WEBHOOK_SECRET" not in markdown
+    assert "SIGN_SECRET" not in markdown
 
 
 def test_split_telegram_message_preserves_content_and_limit() -> None:

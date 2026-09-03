@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from app.account_state import AccountCooldownError, AccountState
+from app.account_state import AccountCooldownError, AccountLoginRequiredError, AccountState
 from app.browser import AuthenticationError, RateLimitedError, RiskControlError, SearchBoxNotReadyError, open_douyin, open_private_messages, save_trace, verify_login
 from app.config import ConfigError, load_settings, load_task
 from app.douyin import DouyinChat
@@ -179,6 +179,7 @@ async def run(
                             target_key=target.identity_key,
                             display_name=target.name,
                             opened=opened,
+                            dry_run=dry_run,
                         )
                         account_state.mark_failure(category)
                         account_failure_category = category
@@ -218,6 +219,7 @@ async def run(
                             target_key=target.identity_key,
                             display_name=target.name,
                             opened=opened,
+                            dry_run=dry_run,
                         )
                         LOGGER.exception("好友处理失败: %s", alias)
                         screenshot = await _screenshot(page, settings.artifacts_dir, alias)
@@ -259,7 +261,7 @@ async def run(
                     if fatal_error is None:
                         fatal_error = exc
                         results.append(TargetResult(target="运行收尾", status="failed", error=str(exc)))
-    except AccountCooldownError as exc:
+    except (AccountCooldownError, AccountLoginRequiredError) as exc:
         if fatal_error is None:
             fatal_error = exc
             account_failure_category = exc.failure_category
@@ -319,7 +321,16 @@ def main() -> int:
                     run_id=run_id,
                 )
             )
-    except (ConfigError, AuthenticationError, RiskControlError, RateLimitedError, AccountCooldownError, SearchBoxNotReadyError, AlreadyRunningError) as exc:
+    except (
+        ConfigError,
+        AuthenticationError,
+        RiskControlError,
+        RateLimitedError,
+        AccountCooldownError,
+        AccountLoginRequiredError,
+        SearchBoxNotReadyError,
+        AlreadyRunningError,
+    ) as exc:
         print(f"错误: {exc}")
         return 2
     except KeyboardInterrupt:
@@ -413,7 +424,8 @@ def _exclude_legacy_terminal_states(
     or migrated. Explicit manual unconfirmed retry is allowed to opt into the
     legacy record by retaining that plan.
     """
-    if target.identity_key == target.name:
+    aliases = _target_history_aliases(target)
+    if not aliases:
         return selected_plans, 0
     selected = []
     duplicates = 0
@@ -422,14 +434,13 @@ def _exclude_legacy_terminal_states(
         for plan in selected_plans
     }
     for plan in selected_plans:
-        legacy_key = history.key(task_id, run_date, target.name, plan[2])
         current_entry = history.entry(current_keys[plan[2]])
-        legacy_entry = history.entry(legacy_key)
-        statuses = {
-            entry.get("status")
-            for entry in (current_entry, legacy_entry)
-            if isinstance(entry, dict)
-        }
+        alias_entries = [
+            history.entry(history.key(task_id, run_date, alias, plan[2]))
+            for alias in aliases
+        ]
+        entries = [current_entry, *alias_entries]
+        statuses = {entry.get("status") for entry in entries if isinstance(entry, dict)}
         if "success" in statuses or ("unconfirmed" in statuses and retry_mode != "unconfirmed"):
             duplicates += 1
             continue
@@ -455,31 +466,41 @@ def _include_legacy_retry_plans(
     retry_mode: RetryMode | None,
 ) -> list[tuple[int, object, str, str]]:
     """Expose legacy name-keyed failures to an explicit retry command."""
-    if target.identity_key == target.name or retry_mode not in {"failed", "unconfirmed"}:
+    # Only the currently configured display name is safe to use as an old
+    # retry key.  remark_name/nickname can be reused by another contact, so
+    # they are terminal-state aliases only (they may block a duplicate, but
+    # must never authorize a resend to an uncertain recipient).
+    aliases = (target.name,) if target.identity_key != target.name else ()
+    if not aliases or retry_mode not in {"failed", "unconfirmed"}:
         return selected_plans
     selected_keys = {plan[3] for plan in selected_plans}
     allowed_status = "failed" if retry_mode == "failed" else "unconfirmed"
     allowed_failed = history.retryable_failed_keys() if retry_mode == "failed" else set()
     result = list(selected_plans)
     for plan in candidate_plans:
-        legacy_key = history.key(task_id, run_date, target.name, plan[2])
         current_entry = history.entry(plan[3])
-        legacy_entry = history.entry(legacy_key)
-        if not isinstance(legacy_entry, dict) or legacy_entry.get("status") != allowed_status:
-            continue
-        # A strong success under either alias always wins. If the stable key
-        # already has a record, keep that one authoritative instead of
-        # replaying an older name-keyed attempt as a second plan.
+        alias_entries = [
+            (
+                alias,
+                history.key(task_id, run_date, alias, plan[2]),
+                history.entry(history.key(task_id, run_date, alias, plan[2])),
+            )
+            for alias in aliases
+        ]
         if any(
             isinstance(entry, dict) and entry.get("status") == "success"
-            for entry in (current_entry, legacy_entry)
+            for entry in (current_entry, *(item[2] for item in alias_entries))
         ) or current_entry is not None:
             continue
-        if retry_mode == "failed" and legacy_key not in allowed_failed:
-            continue
-        if legacy_key not in selected_keys:
-            result.append((plan[0], plan[1], plan[2], legacy_key))
-            selected_keys.add(legacy_key)
+        for _alias, legacy_key, legacy_entry in alias_entries:
+            if not isinstance(legacy_entry, dict) or legacy_entry.get("status") != allowed_status:
+                continue
+            if retry_mode == "failed" and legacy_key not in allowed_failed:
+                continue
+            if legacy_key not in selected_keys:
+                result.append((plan[0], plan[1], plan[2], legacy_key))
+                selected_keys.add(legacy_key)
+            break
     return result
 
 
@@ -487,8 +508,13 @@ def _history_entries_for_target(history: History, task_id: str, run_date: str, t
     seen_keys: set[str] = set()
     for plan in plans:
         keys = [plan[3]]
-        if target.identity_key != target.name:
-            keys.append(history.key(task_id, run_date, target.name, plan[2]))
+        stable_key = history.key(task_id, run_date, target.identity_key, plan[2])
+        if stable_key not in keys:
+            keys.append(stable_key)
+        keys.extend(
+            history.key(task_id, run_date, alias, plan[2])
+            for alias in _target_history_aliases(target)
+        )
         for key in keys:
             if key in seen_keys:
                 continue
@@ -544,6 +570,19 @@ def _exclude_legacy_successes(
     )
 
 
+def _target_history_aliases(target) -> tuple[str, ...]:
+    """Exact display-name aliases used by pre-stable-identity history."""
+    values = (target.name, getattr(target, "remark_name", None), getattr(target, "nickname", None))
+    identity = target.identity_key
+    return tuple(
+        dict.fromkeys(
+            value.strip()
+            for value in values
+            if isinstance(value, str) and value.strip() and value.strip() != identity
+        )
+    )
+
+
 def _persist_target_failure(
     history: History,
     selected: list[tuple[int, object, str, str]],
@@ -554,7 +593,10 @@ def _persist_target_failure(
     target_key: str,
     display_name: str,
     opened: bool,
+    dry_run: bool = False,
 ) -> None:
+    if dry_run:
+        return
     if retry_policy(category).abort_account and current_key is None:
         return
     keys = [current_key] if current_key else ([] if opened else [plan[3] for plan in selected])
@@ -563,7 +605,13 @@ def _persist_target_failure(
         if key is None:
             continue
         entry = history.entry(key)
-        if entry is None:
+        if isinstance(entry, dict) and entry.get("status") == "success":
+            continue
+        if isinstance(entry, dict) and entry.get("status") == "unconfirmed":
+            # An uncertain send remains fail-closed, including when an
+            # explicit retry cannot even reopen the target.
+            continue
+        if not opened or entry is None:
             plan = plan_by_key[key]
             began = history.reserve(
                 key,
@@ -689,6 +737,10 @@ def _overall_status(results: list[TargetResult]) -> str:
         return "unconfirmed"
     if any(result.status == "failed" for result in results):
         return "partial_success" if any(result.status == "success" for result in results) else "failed"
+    if results and not any(result.status == "success" for result in results):
+        # duplicate/skipped are run outcomes, not evidence that a message was
+        # sent.  Keep an all-no-op run distinct from an actual success.
+        return "no_action"
     return "success"
 
 
@@ -764,7 +816,10 @@ async def _notify_dingtalk(
         )
         LOGGER.info("钉钉通知发送成功")
     except Exception:
-        LOGGER.exception("钉钉通知发送失败，不影响本次任务结果")
+        # The signed webhook URL and low-level HTTP exception may contain the
+        # access token/signature.  Keep this operational log deliberately
+        # generic, as the notification failure must never leak credentials.
+        LOGGER.error("钉钉通知发送失败，不影响本次任务结果")
 
 
 async def _notify_telegram(
