@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from app.models import FailureCategory
-from app.recovery import retry_policy
+from app.recovery import RETRY_POLICIES, retry_policy
 
 
 ACCOUNT_STATE_SCHEMA_VERSION = 1
@@ -29,12 +29,16 @@ class AccountState:
     def ensure_runnable(self, now: datetime | None = None) -> None:
         category = self.data.get("failure_category")
         cooldown_until = self.data.get("cooldown_until")
-        if category not in {"risk_control", "rate_limited"} or not isinstance(cooldown_until, str):
+        if category not in {"risk_control", "rate_limited"}:
             return
+        if not isinstance(cooldown_until, str):
+            raise ValueError(f"账号状态 cooldown_until 缺失，为避免绕过冷却限制，任务已停止: {self.path}")
         try:
             deadline = datetime.fromisoformat(cooldown_until)
         except ValueError as exc:
             raise ValueError(f"账号状态 cooldown_until 无效: {self.path}") from exc
+        if deadline.tzinfo is None:
+            raise ValueError(f"账号状态 cooldown_until 必须包含时区: {self.path}")
         current = now or datetime.now().astimezone()
         if current < deadline:
             raise AccountCooldownError(category, cooldown_until)
@@ -91,6 +95,11 @@ class AccountState:
             raise ValueError(f"不支持的账号状态 schema_version: {value.get('schema_version') if isinstance(value, dict) else None}")
         if value.get("account_id") != self.account_id:
             raise ValueError(f"账号状态文件与当前账号不匹配: {self.path}")
+        if value.get("status") not in {"ready", "login_required", "blocked"}:
+            raise ValueError(f"账号状态 status 无效: {self.path}")
+        category = value.get("failure_category")
+        if category is not None and category not in RETRY_POLICIES:
+            raise ValueError(f"账号状态 failure_category 无效: {self.path}")
         return value
 
     def _save(self) -> None:

@@ -51,7 +51,11 @@ class History:
         allow_success_override: bool = False,
     ) -> bool:
         previous = self.entry(key) or {}
-        if previous.get("status") == "success" and not allow_success_override:
+        # Keep the argument for source compatibility with early callers, but
+        # never permit a strong success record to be reopened. A retry command
+        # must prove that the durable state is failed/unconfirmed before it
+        # reaches this method; overriding success would reintroduce duplicates.
+        if previous.get("status") == "success":
             return False
         now = _now()
         attempt_count = _attempt_count(previous) + 1
@@ -194,6 +198,10 @@ def _normalize_entry(value: object) -> dict:
         # failure label with an uncertain send outcome. Preserve the
         # fail-closed meaning instead of exposing it to --retry-failed.
         entry["status"] = "unconfirmed"
+    elif entry.get("status") == "unconfirmed":
+        # The status itself is the safety boundary; never let a stale or
+        # malformed category make an uncertain send look retryable.
+        entry["failure_category"] = "send_unconfirmed"
     entry["attempt_count"] = max(1, _attempt_count(entry))
     return entry
 
@@ -271,10 +279,18 @@ def _existing_lock_is_stale(path: Path) -> bool:
             raise AlreadyRunningError(f"锁文件损坏，无法可靠判断是否失效: {path}") from exc
         stored_identity = None
     else:
-        if not isinstance(value, dict) or not isinstance(value.get("pid"), int):
+        if (
+            not isinstance(value, dict)
+            or not isinstance(value.get("pid"), int)
+            or isinstance(value.get("pid"), bool)
+        ):
             raise AlreadyRunningError(f"锁文件损坏，无法可靠判断是否失效: {path}")
         pid = value["pid"]
         stored_identity = value.get("process_started_at")
+        if stored_identity is not None and (
+            not isinstance(stored_identity, str) or not stored_identity
+        ):
+            raise AlreadyRunningError(f"锁文件损坏，无法可靠判断是否失效: {path}")
 
     alive, current_identity = _process_identity(pid)
     if alive is False:

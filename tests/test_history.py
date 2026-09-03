@@ -93,6 +93,16 @@ def test_reserve_does_not_overwrite_success_without_explicit_override(tmp_path: 
     assert history.entry(key)["status"] == "success"
 
 
+def test_reserve_never_overwrites_success_even_with_legacy_override_flag(tmp_path: Path) -> None:
+    history = History(tmp_path / "history.json")
+    key = "task:date:friend:message"
+    history.reserve(key)
+    history.mark_success(key)
+
+    assert history.reserve(key, allow_success_override=True) is False
+    assert history.entry(key)["status"] == "success"
+
+
 def test_corrupt_history_fails_closed(tmp_path: Path) -> None:
     path = tmp_path / "history.json"
     path.write_text("{broken", encoding="utf-8")
@@ -173,4 +183,13 @@ def test_run_lock_corrupt_or_unverifiable_lock_fails_closed(monkeypatch, tmp_pat
     monkeypatch.setattr(history_module, "_process_identity", lambda _pid: (None, None))
     with pytest.raises(AlreadyRunningError, match="无法可靠判断"):
         with run_lock(unknown):
+            pass
+
+
+def test_run_lock_rejects_malformed_process_identity(tmp_path: Path) -> None:
+    path = tmp_path / "run.lock"
+    path.write_text('{"pid": 123, "process_started_at": {}}', encoding="utf-8")
+
+    with pytest.raises(AlreadyRunningError, match="损坏"):
+        with run_lock(path):
             pass

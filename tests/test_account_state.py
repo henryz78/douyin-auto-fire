@@ -50,3 +50,24 @@ def test_corrupt_account_state_fails_closed(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="账号状态文件损坏"):
         AccountState(path, "account1")
+
+
+def test_invalid_cooldown_state_fails_closed(tmp_path) -> None:
+    path = tmp_path / "account-state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": ACCOUNT_STATE_SCHEMA_VERSION,
+                "account_id": "account1",
+                "status": "blocked",
+                "failure_category": "rate_limited",
+                "last_failure_at": None,
+                "cooldown_until": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = AccountState(path, "account1")
+    with pytest.raises(ValueError, match="cooldown_until 缺失"):
+        state.ensure_runnable()

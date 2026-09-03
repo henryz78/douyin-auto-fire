@@ -49,10 +49,11 @@ async def run(
     if not settings.storage_state and not settings.cookie:
         raise ConfigError("必须配置 DOUYIN_STORAGE_STATE 或 DOUYIN_COOKIE")
 
+    account_id = settings.account_id or "default"
     history = History(settings.artifacts_dir / "history.json")
     account_state = AccountState(
         settings.artifacts_dir / "account-state.json",
-        settings.account_id or "default",
+        account_id,
     )
     run_date = history.run_date(task.timezone)
     if retry_mode == "unconfirmed":
@@ -284,7 +285,7 @@ async def run(
         results,
         aliases,
         run_id=run_id,
-        account_id=settings.account_id,
+        account_id=account_id,
         started_at=started_at,
         finished_at=finished_at,
         retry_mode=retry_mode,
@@ -305,7 +306,11 @@ def main() -> int:
     try:
         settings = load_settings(args.env_file)
         run_id = uuid.uuid4().hex
-        with run_lock(settings.artifacts_dir / "run.lock", run_id=run_id, account_id=settings.account_id):
+        with run_lock(
+            settings.artifacts_dir / "run.lock",
+            run_id=run_id,
+            account_id=settings.account_id or "default",
+        ):
             return asyncio.run(
                 run(
                     dry_run=args.dry_run,
@@ -778,7 +783,7 @@ async def _notify_telegram(
             task_id,
             dry_run,
             results,
-            account_id=settings.account_id,
+            account_id=settings.account_id or "default",
             retry_mode=retry_mode,
         )
         LOGGER.info("Telegram 通知发送成功")
