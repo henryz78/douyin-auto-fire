@@ -27,6 +27,32 @@ def test_build_target_aliases_preserves_order_and_does_not_mutate() -> None:
     assert targets[1].name == "李四"
 
 
+def test_build_target_aliases_covers_identity_candidates() -> None:
+    targets = [
+        Target(
+            name="张三",
+            remark_name="备注张三",
+            nickname="昵称张三",
+            unique_id="uid-1",
+            short_id="short-1",
+            sec_uid="sec-1",
+            messages=(),
+        ),
+        Target(name="李四", remark_name="备注李四", nickname="昵称李四", messages=()),
+    ]
+
+    aliases = build_target_aliases(targets)
+
+    assert aliases["张三"] == "好友01"
+    assert aliases["备注张三"] == "好友01"
+    assert aliases["昵称张三"] == "好友01"
+    assert aliases["uid-1"] == "好友01"
+    assert aliases["short-1"] == "好友01"
+    assert aliases["sec-1"] == "好友01"
+    assert aliases["备注李四"] == "好友02"
+    assert aliases["昵称李四"] == "好友02"
+
+
 def test_redact_text_handles_nested_names_longest_first() -> None:
     aliases = {"小明": "好友01", "小明同学": "好友02"}
 
@@ -116,6 +142,30 @@ def test_write_results_json_is_redacted(tmp_path: Path) -> None:
     assert payload["overall_status"] == "partial_success"
     assert payload["targets"] == payload["results"]
     assert list(tmp_path.glob("result.json.*.tmp")) == []
+
+
+def test_result_json_redacts_all_identity_candidates(tmp_path: Path) -> None:
+    import app.main as main_module
+
+    targets = [
+        Target(name="张三", remark_name="备注张三", nickname="昵称张三", messages=()),
+        Target(name="李四", remark_name="备注李四", nickname="昵称李四", messages=()),
+    ]
+    aliases = build_target_aliases(targets)
+    result = TargetResult(
+        target="张三",
+        status="failed",
+        error="备注张三失败；页面还提到昵称李四",
+        target_alias=aliases["张三"],
+    )
+
+    main_module._write_results(tmp_path, "task", False, [result], aliases)
+
+    content = (tmp_path / "result.json").read_text(encoding="utf-8")
+    assert "备注张三" not in content
+    assert "昵称李四" not in content
+    assert "好友01" in content
+    assert "好友02" in content
 
 
 def test_result_identity_is_stable_but_not_exposed(tmp_path: Path) -> None:

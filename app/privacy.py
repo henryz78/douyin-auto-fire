@@ -14,14 +14,36 @@ def target_alias(index: int) -> str:
 
 
 def build_target_aliases(targets: Iterable[object]) -> dict[str, str]:
-    """Map each target's real name to its public alias by config order."""
+    """Map every configured identity candidate to its public target alias.
+
+    Search and browser errors can echo a remark, nickname, or stable account
+    identifier rather than the display name. Keep all candidates tied to the
+    same alias so logs, result files, and notifications do not expose them.
+    """
     aliases: dict[str, str] = {}
     for index, target in enumerate(targets):
-        name = getattr(target, "name", None)
-        if name is None and isinstance(target, str):
-            name = target
-        if name:
-            aliases[name] = target_alias(index)
+        if isinstance(target, str):
+            candidates = (target,)
+        else:
+            candidates = tuple(
+                getattr(target, field, None)
+                for field in (
+                    "name",
+                    "display_name",
+                    "remark_name",
+                    "nickname",
+                    "unique_id",
+                    "short_id",
+                    "sec_uid",
+                )
+            )
+        alias = target_alias(index)
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                # If two targets share an identity value, preserve the first
+                # mapping rather than silently changing an already redacted
+                # value to another target's alias.
+                aliases.setdefault(candidate.strip(), alias)
     return aliases
 
 

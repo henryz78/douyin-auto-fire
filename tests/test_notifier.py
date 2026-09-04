@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from app.config import ConfigError, load_settings
-from app.models import TargetResult
+from app.models import Target, TargetResult
 from app.notifier import (
     TELEGRAM_MAX_MESSAGE_CHARS,
     _signed_webhook_url,
@@ -18,6 +18,7 @@ from app.notifier import (
     send_telegram_notification,
     split_telegram_message,
 )
+from app.privacy import build_target_aliases
 
 
 def test_signed_webhook_url_uses_dingtalk_hmac() -> None:
@@ -145,15 +146,19 @@ def test_telegram_uses_public_alias_and_redacts_target_from_error() -> None:
 
 
 def test_notifications_redact_all_configured_target_names_from_error() -> None:
+    targets = [
+        Target(name="张三", remark_name="备注张三", nickname="昵称张三", messages=()),
+        Target(name="李四", remark_name="备注李四", nickname="昵称李四", messages=()),
+    ]
     results = [
         TargetResult(
             target="张三",
             status="failed",
-            error="张三失败；浏览器同时提到李四",
+            error="备注张三失败；浏览器同时提到昵称李四",
             target_alias="好友01",
         )
     ]
-    aliases = {"张三": "好友01", "李四": "好友02"}
+    aliases = build_target_aliases(targets)
 
     telegram = build_telegram_message("task", False, results, aliases=aliases)
     _, markdown = build_dingtalk_markdown("task", False, results, [], aliases=aliases)
