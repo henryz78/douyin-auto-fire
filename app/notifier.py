@@ -9,10 +9,12 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Mapping
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from app.models import TargetResult
+from app.privacy import redact_text
 
 
 MAX_RESULTS_PER_SECTION = 15
@@ -29,8 +31,16 @@ async def send_dingtalk_notification(
     results: list[TargetResult],
     screenshots: list[Path],
     retry_mode: str | None = None,
+    aliases: Mapping[str, str] | None = None,
 ) -> None:
-    title, markdown = build_dingtalk_markdown(task_id, dry_run, results, screenshots, retry_mode=retry_mode)
+    title, markdown = build_dingtalk_markdown(
+        task_id,
+        dry_run,
+        results,
+        screenshots,
+        retry_mode=retry_mode,
+        aliases=aliases,
+    )
     payload = {
         "msgtype": "markdown",
         "markdown": {"title": title, "text": markdown},
@@ -48,8 +58,17 @@ async def send_telegram_notification(
     account_id: str | None = None,
     finished_at: datetime | None = None,
     retry_mode: str | None = None,
+    aliases: Mapping[str, str] | None = None,
 ) -> None:
-    message = build_telegram_message(task_id, dry_run, results, account_id, finished_at, retry_mode)
+    message = build_telegram_message(
+        task_id,
+        dry_run,
+        results,
+        account_id,
+        finished_at,
+        retry_mode,
+        aliases=aliases,
+    )
     for chunk in split_telegram_message(message):
         await asyncio.to_thread(_post_telegram_message, bot_token, chat_id, chunk)
 
@@ -61,6 +80,7 @@ def build_telegram_message(
     account_id: str | None = None,
     finished_at: datetime | None = None,
     retry_mode: str | None = None,
+    aliases: Mapping[str, str] | None = None,
 ) -> str:
     successes = [result for result in results if result.status == "success"]
     skipped = [result for result in results if result.status in {"duplicate", "skipped"}]
@@ -98,7 +118,7 @@ def build_telegram_message(
     lines.extend(["", f"失败目标（{len(failures)}）："])
     if failures:
         for result in failures:
-            error = _telegram_text(_result_error(result, "未知错误"), limit=300)
+            error = _telegram_text(_result_error(result, "未知错误", aliases), limit=300)
             sent = f"（已发送 {result.sent} 条）" if result.sent else ""
             lines.append(f"- {_telegram_text(_result_label(result), limit=100)}{sent}：{error}")
     else:
@@ -108,14 +128,14 @@ def build_telegram_message(
         for result in unconfirmed:
             lines.append(
                 f"- {_telegram_text(_result_label(result), limit=100)}："
-                f"{_telegram_text(_result_error(result, '发送结果未确认'), limit=300)}"
+                f"{_telegram_text(_result_error(result, '发送结果未确认', aliases), limit=300)}"
             )
     if account_failures:
         lines.extend(["", f"账号级故障（{len(account_failures)}）："])
         for result in account_failures:
             lines.append(
                 f"- {_telegram_text(result.failure_category or 'unknown', limit=100)}："
-                f"{_telegram_text(_result_error(result, '账号已停止'), limit=300)}"
+                f"{_telegram_text(_result_error(result, '账号已停止', aliases), limit=300)}"
             )
     return "\n".join(lines)
 
@@ -146,6 +166,7 @@ def build_dingtalk_markdown(
     screenshots: list[Path],
     finished_at: datetime | None = None,
     retry_mode: str | None = None,
+    aliases: Mapping[str, str] | None = None,
 ) -> tuple[str, str]:
     successes = [result for result in results if result.status == "success"]
     skipped = [result for result in results if result.status in {"duplicate", "skipped"}]
@@ -186,20 +207,22 @@ def build_dingtalk_markdown(
         lines.extend(["", f"#### 未确认（{len(unconfirmed)}，不会自动重发）"])
         for index, result in enumerate(unconfirmed[:MAX_RESULTS_PER_SECTION], 1):
             lines.append(f"{index}. **{_markdown_text(_result_label(result), limit=100)}**")
-            lines.append(f"   - 原因：{_markdown_text(_result_error(result, '发送结果未确认'), limit=300)}")
+            lines.append(
+                f"   - 原因：{_markdown_text(_result_error(result, '发送结果未确认', aliases), limit=300)}"
+            )
 
     if account_failures:
         lines.extend(["", f"#### 账号级故障（{len(account_failures)}）"])
         for result in account_failures[:MAX_RESULTS_PER_SECTION]:
             lines.append(
                 f"- **{_markdown_text(result.failure_category or 'unknown')}**："
-                f"{_markdown_text(_result_error(result, '账号已停止'), limit=300)}"
+                f"{_markdown_text(_result_error(result, '账号已停止', aliases), limit=300)}"
             )
 
     lines.extend(["", f"#### 失败名单（{len(failures)}）"])
     if failures:
         for index, result in enumerate(failures[:MAX_RESULTS_PER_SECTION], 1):
-            error = _markdown_text(_result_error(result, "未知错误"), limit=300)
+            error = _markdown_text(_result_error(result, "未知错误", aliases), limit=300)
             sent = f"，已发送 {result.sent} 条" if result.sent else ""
             lines.append(f"{index}. **{_markdown_text(_result_label(result), limit=100)}**{sent}")
             lines.append(f"   - 原因：{error}")
@@ -235,13 +258,18 @@ def _result_label(result: TargetResult) -> str:
     return result.target_alias or result.target
 
 
-def _result_error(result: TargetResult, default: str) -> str:
-    """Redact the result's own real target name from human-facing errors."""
+def _result_error(
+    result: TargetResult,
+    default: str,
+    aliases: Mapping[str, str] | None = None,
+) -> str:
+    """Redact configured target names from human-facing errors."""
 
     value = result.error or default
+    effective_aliases = dict(aliases or {})
     if result.target_alias and result.target:
-        value = value.replace(result.target, result.target_alias)
-    return value
+        effective_aliases[result.target] = result.target_alias
+    return redact_text(value, effective_aliases)
 
 
 def _telegram_status(successes, failures, unconfirmed, account_failures, retry_mode: str | None, skipped=None) -> str:

@@ -144,6 +144,30 @@ def test_telegram_uses_public_alias_and_redacts_target_from_error() -> None:
     assert "张三" not in message
 
 
+def test_notifications_redact_all_configured_target_names_from_error() -> None:
+    results = [
+        TargetResult(
+            target="张三",
+            status="failed",
+            error="张三失败；浏览器同时提到李四",
+            target_alias="好友01",
+        )
+    ]
+    aliases = {"张三": "好友01", "李四": "好友02"}
+
+    telegram = build_telegram_message("task", False, results, aliases=aliases)
+    _, markdown = build_dingtalk_markdown("task", False, results, [], aliases=aliases)
+
+    assert "好友01" in telegram
+    assert "好友02" in telegram
+    assert "张三" not in telegram
+    assert "李四" not in telegram
+    assert "好友01" in markdown
+    assert "好友02" in markdown
+    assert "张三" not in markdown
+    assert "李四" not in markdown
+
+
 def test_notifications_distinguish_unconfirmed_account_failure_and_recovery() -> None:
     unconfirmed = build_telegram_message(
         "task",

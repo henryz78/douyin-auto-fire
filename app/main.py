@@ -298,8 +298,23 @@ async def run(
         retry_mode=retry_mode,
         screenshots=screenshots,
     )
-    await _notify_dingtalk(settings, task.task_id, dry_run, results, screenshots, retry_mode=retry_mode)
-    await _notify_telegram(settings, task.task_id, dry_run, results, retry_mode=retry_mode)
+    await _notify_dingtalk(
+        settings,
+        task.task_id,
+        dry_run,
+        results,
+        screenshots,
+        retry_mode=retry_mode,
+        aliases=aliases,
+    )
+    await _notify_telegram(
+        settings,
+        task.task_id,
+        dry_run,
+        results,
+        retry_mode=retry_mode,
+        aliases=aliases,
+    )
     succeeded = sum(result.status in {"success", "duplicate", "skipped"} for result in results)
     failed = sum(result.status in {"failed", "unconfirmed"} for result in results)
     LOGGER.info("执行结束: 成功/跳过 %d，失败或未确认 %d", succeeded, failed)
@@ -806,6 +821,7 @@ async def _notify_dingtalk(
     results: list[TargetResult],
     screenshots: list[Path],
     retry_mode: RetryMode | None = None,
+    aliases: dict[str, str] | None = None,
 ) -> None:
     if not settings.dingtalk_webhook or not settings.dingtalk_secret:
         return
@@ -818,6 +834,7 @@ async def _notify_dingtalk(
             results,
             screenshots,
             retry_mode=retry_mode,
+            aliases=aliases,
         )
         LOGGER.info("钉钉通知发送成功")
     except Exception:
@@ -833,6 +850,7 @@ async def _notify_telegram(
     dry_run: bool,
     results: list[TargetResult],
     retry_mode: RetryMode | None = None,
+    aliases: dict[str, str] | None = None,
 ) -> None:
     if not settings.telegram_bot_token or not settings.telegram_chat_id:
         return
@@ -845,6 +863,7 @@ async def _notify_telegram(
             results,
             account_id=settings.account_id or "default",
             retry_mode=retry_mode,
+            aliases=aliases,
         )
         LOGGER.info("Telegram 通知发送成功")
     except Exception:
