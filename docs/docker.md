@@ -15,7 +15,7 @@ Python、Playwright、Chromium 和项目代码都已经封装进镜像，**Docke
 ## 1. 准备部署目录
 
 ```bash
-mkdir -p ~/douyin-auto-fire/artifacts ~/douyin-auto-fire/config
+mkdir -p ~/douyin-auto-fire/artifacts ~/douyin-auto-fire/config ~/douyin-auto-fire/storage_state
 cd ~/douyin-auto-fire
 ```
 
@@ -99,11 +99,20 @@ CRON_SCHEDULE=30 0 * * *
 RUN_ON_START=false
 HEADLESS=true
 DOUYIN_COOKIE=/data/cookie.json
+# 如使用 Storage State，请改为 /data/storage_state/storage-state.json；Cookie 可留空
+DOUYIN_STORAGE_STATE=
 TASK_CONFIG=/app/config.json
 ARTIFACTS_DIR=/app/artifacts
 
 DINGTALK_WEBHOOK=
 DINGTALK_SECRET=
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
+# 可选代理（认证代理需同时填写用户名和密码）
+DOUYIN_PROXY_SERVER=
+DOUYIN_PROXY_USERNAME=
+DOUYIN_PROXY_PASSWORD=
 ```
 
 `CRON_SCHEDULE=30 0 * * *` 表示每天 00:30 执行。
@@ -131,6 +140,15 @@ RUN_ON_START=true
 ```env
 RUN_ON_START=false
 ```
+
+如果使用浏览器 Storage State 登录，请将文件放在宿主机 `storage_state/storage-state.json`，并在 `.env` 中设置：
+
+```env
+DOUYIN_COOKIE=
+DOUYIN_STORAGE_STATE=/data/storage_state/storage-state.json
+```
+
+代理和 Telegram 变量会直接传入容器；未填写时保持直连或不发送对应通知。
 
 ---
 
@@ -376,6 +394,7 @@ douyin-auto-fire/
 ├── config.json
 ├── cookie.json
 ├── config/
+├── storage_state/
 └── artifacts/
 ```
 
@@ -384,6 +403,7 @@ douyin-auto-fire/
 - `docker-compose.yml`：容器配置；
 - `config.json`：单账号任务配置；
 - `cookie.json`：单账号 Cookie；
+- `storage_state/`：可选的浏览器 Storage State 文件；
 - `.env`：时区、Cron、Headless、全局钉钉通知等；
 - `config/`：多账号配置目录；
 - `artifacts/`：日志、截图、Trace、历史记录等运行产物。

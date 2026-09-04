@@ -1050,6 +1050,38 @@ async def test_real_pending_then_success(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_real_pending_clear_then_late_retry_fails(monkeypatch) -> None:
+    # A retry marker can mount well after the spinner clears. The sender must
+    # keep observing for the entire confirmation budget instead of accepting
+    # success after only the old 500ms stable window.
+    page = await _make_real_page()
+    try:
+        async def mount_spin(pg):
+            await _set_side_inner(pg, "spin")
+
+        async def clear_spin(pg):
+            await _clear_side(pg)
+
+        async def mount_retry(pg):
+            await _set_side_inner(pg, "retry")
+
+        clock = _VirtualClock(
+            schedules=[
+                (10, mount_spin),
+                (400, clear_spin),
+                (1300, mount_retry),
+            ]
+        )
+        _patch_clock(monkeypatch, clock)
+        page.wait_for_timeout = lambda ms: clock.wait_for_timeout(ms, page)
+        scope = await _scope(page)
+        with pytest.raises(PageOperationError, match="发送失败"):
+            await _await_send_terminal_state(page, scope, "文字", timeout_ms=5000)
+    finally:
+        await _teardown_real_page(page)
+
+
+@pytest.mark.asyncio
 async def test_real_pending_timeout_never_success(monkeypatch) -> None:
     page = await _make_real_page()
     try:

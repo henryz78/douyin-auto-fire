@@ -100,8 +100,8 @@ SEND_PENDING_MARKERS = (
 SEND_CONFIRM_TIMEOUT_MS = 15_000
 # Poll interval for re-checking pending/failure state.
 SEND_POLL_INTERVAL_MS = 300
-# Short grace after pending clears: the retry marker can mount a tick after the
-# spinner disappears, so require a stable non-pending frame before success.
+# Minimum clean interval at the confirmation deadline: the retry marker can
+# mount after the spinner disappears, so a clean state must remain stable too.
 SEND_STABLE_INTERVAL_MS = 500
 async def send_message(page: Page, chat: DouyinChat, message: Message, stickers: dict[str, Sticker]) -> None:
     if message.type == "random":
@@ -414,28 +414,33 @@ async def _await_send_terminal_state(
         return
 
     # Phase 2: a spinner appeared. Wait for it to clear (or flip to failure),
-    # then require a stable clean window before success.
+    # then keep observing until the confirmation budget is exhausted. A
+    # retry marker can mount after the spinner disappears, so a short clean
+    # window alone is not a terminal success signal.
+    clean_since: float | None = None
     while True:
         if await _marker_visible(scope, SEND_FAILURE_MARKERS):
             raise PageOperationError(f"{label}发送失败，页面提示可以重试")
-        if _monotonic() >= deadline:
+        pending = await _marker_visible(scope, SEND_PENDING_MARKERS)
+        now = _monotonic()
+        if pending:
+            clean_since = None
+        else:
+            # Spinner gone. Remember when the clean state began and keep
+            # polling through the rest of the budget so a late retry marker is
+            # still observed. The stable interval remains the minimum clean
+            # hold needed at the deadline.
+            clean_since = now if clean_since is None else clean_since
+            if now >= deadline:
+                if now - clean_since >= SEND_STABLE_INTERVAL_MS / 1000:
+                    return
+                raise PageOperationError(
+                    f"{label}发送状态未能确认（发送超时或状态不确定），为避免重复不会自动重试"
+                )
+        if now >= deadline:
             raise PageOperationError(
                 f"{label}发送状态未能确认（发送超时或状态不确定），为避免重复不会自动重试"
             )
-        if not await _marker_visible(scope, SEND_PENDING_MARKERS):
-            # Spinner gone. Require it to STAY clear across the stable window --
-            # the retry marker can mount a tick after the spinner disappears.
-            remaining_ms = max(1, int((deadline - _monotonic()) * 1000))
-            await page.wait_for_timeout(min(SEND_STABLE_INTERVAL_MS, remaining_ms))
-            if await _marker_visible(scope, SEND_FAILURE_MARKERS):
-                raise PageOperationError(f"{label}发送失败，页面提示可以重试")
-            if not await _marker_visible(scope, SEND_PENDING_MARKERS):
-                if _monotonic() >= deadline:
-                    # We held a clean state through the remaining confirmation
-                    # budget, so this is a confirmed terminal success.
-                    return
-                return  # terminal: success
-            # spinner reappeared -> keep waiting
         remaining_ms = max(1, int((deadline - _monotonic()) * 1000))
         await page.wait_for_timeout(min(SEND_POLL_INTERVAL_MS, remaining_ms))
 
