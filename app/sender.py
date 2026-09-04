@@ -12,8 +12,8 @@ from app.models import Message, Sticker
 from app.selectors import IMAGE_INPUTS, MESSAGE_INPUTS, STICKER_BUTTONS, STICKER_PANELS
 
 
-class StickerNotSubmittedError(PageOperationError):
-    """The sticker click only staged a composer payload, not an outgoing bubble."""
+class OutgoingBubbleNotFoundError(PageOperationError):
+    """No new outgoing bubble was observed after a send action."""
 
 
 def _monotonic() -> float:
@@ -103,16 +103,6 @@ SEND_POLL_INTERVAL_MS = 300
 # Short grace after pending clears: the retry marker can mount a tick after the
 # spinner disappears, so require a stable non-pending frame before success.
 SEND_STABLE_INTERVAL_MS = 500
-# Initial-clean grace window. A freshly matched bubble with no spinner and no
-# failure marker is NOT yet success -- Douyin mounts the spinner/retry *after*
-# the bubble. We must keep observing until either a state appears or the whole
-# grace window stays clean (Issue #11 E2E regression: late-mounting retry was
-# missed because the old single 500ms check ended before the retry mounted).
-# This is a continuous observation window, NOT a single sleep: the loop polls
-# every SEND_POLL_INTERVAL_MS throughout it.
-SEND_INITIAL_CLEAN_GRACE_MS = 3_000
-
-
 async def send_message(page: Page, chat: DouyinChat, message: Message, stickers: dict[str, Sticker]) -> None:
     if message.type == "random":
         await send_message(page, chat, random.choice(message.choices), stickers)
@@ -276,12 +266,51 @@ async def _click_and_confirm_sticker(page: Page, item, before: tuple[str, str], 
     await item.click(force=True)
     try:
         await _confirm_sticker_sent(page, before, name, resource_key)
-    except StickerNotSubmittedError:
-        if await _publish_ready(page):
-            await _trigger_send(page)
-            await _confirm_sticker_sent(page, before, name, resource_key)
-        else:
+    except OutgoingBubbleNotFoundError:
+        # A confirmation timeout is inherently ambiguous: the first click may
+        # already have reached Douyin. Only retry when the composer itself
+        # positively contains the selected sticker payload. A visible send
+        # button alone is not evidence because it may also be present after a
+        # successful send.
+        if not await _sticker_payload_staged(page, resource_key):
             raise
+        if not await _publish_ready(page):
+            raise
+        # _confirm_outgoing_message removes its anchor in a finally block. Take
+        # a fresh snapshot before the explicit publish so the second
+        # confirmation cannot treat the old bubble as the newly sent sticker.
+        retry_before = await _mark_latest_outgoing_message(page)
+        await _trigger_send(page)
+        await _confirm_sticker_sent(page, retry_before, name, resource_key)
+
+
+async def _sticker_payload_staged(page: Page, resource_key: str) -> bool:
+    """Return True only when the composer visibly contains this sticker.
+
+    The resource key is taken from the clicked sticker's source URL. If the
+    page does not expose a stable key, fail closed instead of treating a
+    generic send button as proof that the click merely staged a payload.
+    """
+
+    if not resource_key:
+        return False
+    for selector in MESSAGE_INPUTS:
+        try:
+            editor = page.locator(selector).first
+            if not await editor.count() or not await editor.is_visible():
+                continue
+            html = await editor.inner_html()
+            if resource_key in html:
+                return True
+            images = editor.locator("img")
+            for index in range(await images.count()):
+                src = await images.nth(index).get_attribute("src")
+                if isinstance(src, str) and resource_key in src:
+                    return True
+        except Exception:
+            # A page/protocol error is not evidence of staged state.
+            return False
+    return False
 
 
 async def _sticker_resource_key(item) -> str:
@@ -301,16 +330,7 @@ async def _confirm_sticker_sent(
     name: str,
     resource_key: str = "",
 ) -> None:
-    try:
-        await _confirm_outgoing_message(page, before, f"原生表情“{name}”", resource_key=resource_key)
-    except PageOperationError as exc:
-        # A missing outgoing bubble is the only case we conservatively treat
-        # as a sticker click that staged the composer payload. Explicit send
-        # failure and terminal-state timeout errors remain ordinary
-        # PageOperationError values and are therefore fail-closed.
-        if "没有检测到新的已发送消息" in str(exc):
-            raise StickerNotSubmittedError(str(exc)) from exc
-        raise
+    await _confirm_outgoing_message(page, before, f"原生表情“{name}”", resource_key=resource_key)
 
 
 async def _marker_visible(scope: Locator, selectors: tuple[str, ...]) -> bool:
@@ -320,12 +340,14 @@ async def _marker_visible(scope: Locator, selectors: tuple[str, ...]) -> bool:
     spinners cannot influence the verdict.
     """
     for selector in selectors:
-        marker = scope.locator(selector).first
         try:
+            marker = scope.locator(selector).first
             if await marker.count() and await marker.is_visible():
                 return True
-        except Exception:
-            continue
+        except Exception as exc:
+            raise PageOperationError(
+                "发送状态无法读取（页面或协议异常），为避免重复不会自动重试"
+            ) from exc
     return False
 
 
@@ -345,7 +367,7 @@ async def _await_send_terminal_state(
         OBSERVING_INITIAL  (bubble matched, status not yet resolved)
            |  failure visible            -> FAILED
            |  pending visible            -> WAITING_PENDING
-           |  clean for the whole grace  -> SUCCESS
+           |  clean for the whole confirmation budget -> SUCCESS
            v
         WAITING_PENDING  (spinner visible)
            |  failure visible            -> FAILED
@@ -360,8 +382,8 @@ async def _await_send_terminal_state(
     as UNKNOWN/OBSERVING, never as success, because Douyin mounts the spinner or
     retry marker *after* the bubble (Issue #11 E2E regression: the old code
     declared success after a single 500ms check, before a late retry mounted).
-    The initial-clean grace window therefore polls continuously; success only
-    after the bubble stays clean for the full window (or pending clears + holds).
+    The clean-only path therefore polls continuously through the complete
+    confirmation budget (or until pending clears + holds).
 
     ``timeout_ms`` is the overall budget; a stuck spinner past it raises, never
     success. ``page.wait_for_timeout`` advances the injectable monotonic clock,
@@ -369,22 +391,23 @@ async def _await_send_terminal_state(
     """
     deadline = _monotonic() + timeout_ms / 1000
 
-    # Phase 1: observe the freshly matched bubble. It is UNKNOWN until either a
-    # state marker appears or the initial-clean grace window elapses clean.
-    grace_deadline = min(deadline, _monotonic() + SEND_INITIAL_CLEAN_GRACE_MS / 1000)
-    while _monotonic() < grace_deadline:
-        if _monotonic() >= deadline:
-            raise PageOperationError(
-                f"{label}发送状态未能确认（发送超时或状态不确定），为避免重复不会自动重试"
-            )
+    # Phase 1: observe the freshly matched bubble. It is UNKNOWN until either
+    # a state marker appears or the complete confirmation budget stays clean.
+    # There is no reliable positive success marker on every Douyin build, so a
+    # short clean grace would allow a late retry marker to be missed.
+    while _monotonic() < deadline:
         if await _marker_visible(scope, SEND_FAILURE_MARKERS):
             raise PageOperationError(f"{label}发送失败，页面提示可以重试")
         if await _marker_visible(scope, SEND_PENDING_MARKERS):
             break  # -> resolve pending in Phase 2
-        await page.wait_for_timeout(SEND_POLL_INTERVAL_MS)
+        remaining_ms = max(1, int((deadline - _monotonic()) * 1000))
+        await page.wait_for_timeout(min(SEND_POLL_INTERVAL_MS, remaining_ms))
     else:
-        # Grace window elapsed fully clean -> fast success (normal fast send).
-        if _monotonic() >= deadline:
+        # The entire confirmation budget stayed clean. Re-check markers once
+        # at the boundary before accepting the otherwise marker-less success.
+        if await _marker_visible(scope, SEND_FAILURE_MARKERS):
+            raise PageOperationError(f"{label}发送失败，页面提示可以重试")
+        if await _marker_visible(scope, SEND_PENDING_MARKERS):
             raise PageOperationError(
                 f"{label}发送状态未能确认（发送超时或状态不确定），为避免重复不会自动重试"
             )
@@ -393,22 +416,28 @@ async def _await_send_terminal_state(
     # Phase 2: a spinner appeared. Wait for it to clear (or flip to failure),
     # then require a stable clean window before success.
     while True:
+        if await _marker_visible(scope, SEND_FAILURE_MARKERS):
+            raise PageOperationError(f"{label}发送失败，页面提示可以重试")
         if _monotonic() >= deadline:
             raise PageOperationError(
                 f"{label}发送状态未能确认（发送超时或状态不确定），为避免重复不会自动重试"
             )
-        if await _marker_visible(scope, SEND_FAILURE_MARKERS):
-            raise PageOperationError(f"{label}发送失败，页面提示可以重试")
         if not await _marker_visible(scope, SEND_PENDING_MARKERS):
             # Spinner gone. Require it to STAY clear across the stable window --
             # the retry marker can mount a tick after the spinner disappears.
-            await page.wait_for_timeout(SEND_STABLE_INTERVAL_MS)
+            remaining_ms = max(1, int((deadline - _monotonic()) * 1000))
+            await page.wait_for_timeout(min(SEND_STABLE_INTERVAL_MS, remaining_ms))
             if await _marker_visible(scope, SEND_FAILURE_MARKERS):
                 raise PageOperationError(f"{label}发送失败，页面提示可以重试")
             if not await _marker_visible(scope, SEND_PENDING_MARKERS):
+                if _monotonic() >= deadline:
+                    # We held a clean state through the remaining confirmation
+                    # budget, so this is a confirmed terminal success.
+                    return
                 return  # terminal: success
             # spinner reappeared -> keep waiting
-        await page.wait_for_timeout(SEND_POLL_INTERVAL_MS)
+        remaining_ms = max(1, int((deadline - _monotonic()) * 1000))
+        await page.wait_for_timeout(min(SEND_POLL_INTERVAL_MS, remaining_ms))
 
 
 async def _confirm_outgoing_message(
@@ -448,7 +477,9 @@ async def _confirm_outgoing_message(
     except PageOperationError:
         raise
     except Exception as exc:
-        raise PageOperationError(f"{label}已发送，但没有检测到新的已发送消息") from exc
+        raise OutgoingBubbleNotFoundError(
+            f"{label}已触发，但没有检测到新的已发送消息；发送状态未能确认，为避免重复不会自动重试"
+        ) from exc
     finally:
         anchors = page.locator(f"[{MESSAGE_CONFIRM_ANCHOR}]")
         try:

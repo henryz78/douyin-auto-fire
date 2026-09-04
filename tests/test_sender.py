@@ -11,14 +11,16 @@ from app.sender import (
     SEND_BUTTONS,
     SEND_FAILURE_MARKERS,
     SEND_PENDING_MARKERS,
-    StickerNotSubmittedError,
+    OutgoingBubbleNotFoundError,
     _await_send_terminal_state,
     _click_and_confirm_sticker,
     _confirm_outgoing_message,
     _confirm_sticker_sent,
+    _marker_visible,
     _publish_ready,
     _restore_composer,
     _sticker_resource_key,
+    _sticker_payload_staged,
     _trigger_send,
     send_message,
     send_text,
@@ -285,11 +287,13 @@ async def test_sticker_click_retries_via_publish_when_staged(monkeypatch) -> Non
     item.locator.return_value = img_loc
     page = MagicMock()
     calls = {"confirm": 0, "publish": 0}
+    befores = []
 
     async def fake_confirm(_page, _before, _name, _key=""):
         calls["confirm"] += 1
+        befores.append(_before)
         if calls["confirm"] == 1:
-            raise StickerNotSubmittedError("未检测到新的已发送消息")
+            raise OutgoingBubbleNotFoundError("未检测到新的已发送消息")
         return None
 
     async def fake_trigger(_page):
@@ -301,11 +305,17 @@ async def test_sticker_click_retries_via_publish_when_staged(monkeypatch) -> Non
     monkeypatch.setattr("app.sender._confirm_sticker_sent", fake_confirm)
     monkeypatch.setattr("app.sender._trigger_send", fake_trigger)
     monkeypatch.setattr("app.sender._publish_ready", fake_ready)
+    monkeypatch.setattr("app.sender._sticker_payload_staged", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        "app.sender._mark_latest_outgoing_message",
+        AsyncMock(return_value=("fresh", "old-after-timeout")),
+    )
 
     await _click_and_confirm_sticker(page, item, ("anchor", "old"), "比心")
 
     assert calls["confirm"] == 2
     assert calls["publish"] == 1
+    assert befores == [("anchor", "old"), ("fresh", "old-after-timeout")]
 
 
 @pytest.mark.asyncio
@@ -335,6 +345,44 @@ async def test_sticker_click_raises_when_not_staged(monkeypatch) -> None:
 
     with pytest.raises(PageOperationError):
         await _click_and_confirm_sticker(page, item, ("anchor", "old"), "比心")
+
+
+@pytest.mark.asyncio
+async def test_sticker_click_does_not_retry_after_confirmation_timeout(monkeypatch) -> None:
+    item = MagicMock()
+    item.get_attribute = AsyncMock(return_value="https://cdn.example/sticker-key.png")
+    item.click = AsyncMock()
+    page = MagicMock()
+    trigger = AsyncMock()
+    ready = AsyncMock(return_value=True)
+
+    async def timeout(_page, _before, _name, _key=""):
+        raise OutgoingBubbleNotFoundError("发送状态未能确认，为避免重复不会自动重试")
+
+    monkeypatch.setattr("app.sender._confirm_sticker_sent", timeout)
+    monkeypatch.setattr("app.sender._sticker_payload_staged", AsyncMock(return_value=False))
+    monkeypatch.setattr("app.sender._publish_ready", ready)
+    monkeypatch.setattr("app.sender._trigger_send", trigger)
+
+    with pytest.raises(OutgoingBubbleNotFoundError, match="状态未能确认"):
+        await _click_and_confirm_sticker(page, item, ("anchor", "old"), "比心")
+    ready.assert_not_awaited()
+    trigger.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sticker_payload_staged_requires_matching_resource() -> None:
+    page = MagicMock()
+    editor = MagicMock()
+    editor.count = AsyncMock(return_value=1)
+    editor.is_visible = AsyncMock(return_value=True)
+    editor.inner_html = AsyncMock(return_value='<img src="https://cdn.example/sticker-key.png">')
+    editor.locator.return_value = MagicMock()
+    page.locator.return_value = MagicMock(first=editor)
+
+    assert await _sticker_payload_staged(page, "sticker-key") is True
+    assert await _sticker_payload_staged(page, "other-key") is False
+    assert await _sticker_payload_staged(page, "") is False
 
 
 @pytest.mark.asyncio
@@ -433,7 +481,7 @@ async def test_sticker_confirmation_reports_missing_new_message() -> None:
     anchors.evaluate_all = AsyncMock()
     page.locator.return_value = anchors
 
-    with pytest.raises(StickerNotSubmittedError, match="没有检测到新的已发送消息"):
+    with pytest.raises(OutgoingBubbleNotFoundError, match="没有检测到新的已发送消息"):
         await _confirm_sticker_sent(page, ("anchor", "old-content"), "比心")
 
 
@@ -597,6 +645,15 @@ async def test_confirm_pending_timeout_never_succeeds(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_marker_probe_failure_is_fail_closed() -> None:
+    scope = MagicMock()
+    scope.locator.side_effect = RuntimeError("页面已关闭")
+
+    with pytest.raises(PageOperationError, match="状态无法读取"):
+        await _marker_visible(scope, SEND_FAILURE_MARKERS)
+
+
+@pytest.mark.asyncio
 async def test_confirm_clean_then_late_failure_fails(monkeypatch) -> None:
     # The exact E2E regression (Run 32843213569): bubble is clean for several
     # polls (longer than the old single 500ms stable window), THEN a retry
@@ -613,11 +670,11 @@ async def test_confirm_clean_then_late_failure_fails(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_confirm_clean_then_late_failure_after_two_seconds_fails(monkeypatch) -> None:
-    # A retry marker appearing after the previous 2s grace window is still a
-    # failure. Keep the longer grace window covered so a clean early frame
-    # cannot be promoted to success before this late terminal state arrives.
-    frames = [(False, False)] * 8 + [(True, False)]
+async def test_confirm_clean_then_late_failure_after_three_seconds_fails(monkeypatch) -> None:
+    # A retry marker appearing after the previous 3s grace window is still a
+    # failure. The clean-only path now observes through the whole confirmation
+    # budget, so it cannot be promoted to success before this late state.
+    frames = [(False, False)] * 12 + [(True, False)]
     timeline = _Timeline(frames)
     monkeypatch.setattr(sender_module, "_monotonic", lambda: timeline.clock)
     page = _FakePage(timeline)
@@ -627,19 +684,16 @@ async def test_confirm_clean_then_late_failure_after_two_seconds_fails(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_confirm_sustained_clean_reaches_success_via_grace(monkeypatch) -> None:
-    # Normal fast send: no spinner/retry ever appears. The bubble must reach
-    # success once the initial-clean grace window elapses fully clean, WITHOUT
-    # waiting the full total timeout (15s). Frames stay clean throughout.
-    # Enough clean frames to outlast the 3s grace window at 300ms/500ms polls.
+async def test_confirm_sustained_clean_reaches_success_after_full_budget(monkeypatch) -> None:
+    # A clean-only bubble has no positive success marker. It is accepted only
+    # after the complete confirmation budget stays clean.
     frames = [(False, False)] * 20
     timeline = _Timeline(frames)
     monkeypatch.setattr(sender_module, "_monotonic", lambda: timeline.clock)
     page = _FakePage(timeline)
 
     await _confirm_outgoing_message(page, ("anchor", "old"), "文字", expected_text="测试文字")
-    # Grace window (3s) is well below the total timeout (15s).
-    assert timeline.clock < 15.0
+    assert timeline.clock >= 15.0
 
 
 @pytest.mark.asyncio
@@ -942,8 +996,8 @@ async def test_real_clean_then_delayed_pending_then_success(monkeypatch) -> None
 
 @pytest.mark.asyncio
 async def test_real_sustained_clean_fast_success(monkeypatch) -> None:
-    # Normal fast send: no spinner ever appears. Must succeed once the
-    # initial-clean grace elapses, WITHOUT waiting the full total timeout.
+    # A clean-only bubble has no positive success marker. It is accepted only
+    # after the complete confirmation budget stays clean.
     page = await _make_real_page()
     try:
         clock = _VirtualClock()
@@ -951,8 +1005,7 @@ async def test_real_sustained_clean_fast_success(monkeypatch) -> None:
         page.wait_for_timeout = lambda ms: clock.wait_for_timeout(ms, page)
         scope = await _scope(page)
         await _await_send_terminal_state(page, scope, "文字", timeout_ms=10_000)
-        # Grace is bounded; virtual time should be far below the 10s total.
-        assert clock.now < 5_000
+        assert clock.now >= 10.0
     finally:
         await _teardown_real_page(page)
 

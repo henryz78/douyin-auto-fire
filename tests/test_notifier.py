@@ -74,7 +74,7 @@ def test_dingtalk_webhook_and_secret_must_be_configured_together(monkeypatch) ->
         load_settings()
 
 
-def test_markdown_shows_real_name_even_with_alias() -> None:
+def test_markdown_uses_public_alias_instead_of_real_name() -> None:
     results = [
         TargetResult(target="张三", status="success", sent=1, target_alias="好友01"),
         TargetResult(target="李四", status="failed", sent=0, error="搜索不到目标好友", target_alias="好友02"),
@@ -82,10 +82,10 @@ def test_markdown_shows_real_name_even_with_alias() -> None:
 
     _, markdown = build_dingtalk_markdown("daily-streak", False, results, [])
 
-    assert "张三" in markdown
-    assert "李四" in markdown
-    assert "好友01" not in markdown
-    assert "好友02" not in markdown
+    assert "好友01" in markdown
+    assert "好友02" in markdown
+    assert "张三" not in markdown
+    assert "李四" not in markdown
 
 
 def test_markdown_escapes_dynamic_text_and_limits_large_lists() -> None:
@@ -124,6 +124,24 @@ def test_telegram_message_lists_successes_failures_and_account() -> None:
     assert "- 好友A（已发送 2 条）" in message
     assert "失败目标（1）：" in message
     assert "- 好友B（已发送 1 条）：发送失败 请重试" in message
+
+
+def test_telegram_uses_public_alias_and_redacts_target_from_error() -> None:
+    message = build_telegram_message(
+        "daily-streak",
+        False,
+        [
+            TargetResult(
+                target="张三",
+                status="failed",
+                error="张三发送失败",
+                target_alias="好友01",
+            )
+        ],
+    )
+
+    assert "好友01" in message
+    assert "张三" not in message
 
 
 def test_notifications_distinguish_unconfirmed_account_failure_and_recovery() -> None:

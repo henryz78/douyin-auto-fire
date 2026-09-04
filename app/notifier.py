@@ -87,30 +87,36 @@ def build_telegram_message(
     if successes:
         for result in successes:
             detail = "验证通过" if dry_run else f"已发送 {result.sent} 条"
-            lines.append(f"- {_telegram_text(result.target, limit=100)}（{detail}）")
+            lines.append(f"- {_telegram_text(_result_label(result), limit=100)}（{detail}）")
     else:
         lines.append("- 无")
     if skipped:
         lines.extend(["", f"跳过目标（{len(skipped)}，没有新发送）："])
         for result in skipped:
-            lines.append(f"- {_telegram_text(result.target, limit=100)}")
+            lines.append(f"- {_telegram_text(_result_label(result), limit=100)}")
 
     lines.extend(["", f"失败目标（{len(failures)}）："])
     if failures:
         for result in failures:
-            error = _telegram_text(result.error or "未知错误", limit=300)
+            error = _telegram_text(_result_error(result, "未知错误"), limit=300)
             sent = f"（已发送 {result.sent} 条）" if result.sent else ""
-            lines.append(f"- {_telegram_text(result.target, limit=100)}{sent}：{error}")
+            lines.append(f"- {_telegram_text(_result_label(result), limit=100)}{sent}：{error}")
     else:
         lines.append("- 无")
     if unconfirmed:
         lines.extend(["", f"未确认（{len(unconfirmed)}，不会自动重发）："])
         for result in unconfirmed:
-            lines.append(f"- {_telegram_text(result.target, limit=100)}：{_telegram_text(result.error or '发送结果未确认', limit=300)}")
+            lines.append(
+                f"- {_telegram_text(_result_label(result), limit=100)}："
+                f"{_telegram_text(_result_error(result, '发送结果未确认'), limit=300)}"
+            )
     if account_failures:
         lines.extend(["", f"账号级故障（{len(account_failures)}）："])
         for result in account_failures:
-            lines.append(f"- {_telegram_text(result.failure_category or 'unknown', limit=100)}：{_telegram_text(result.error or '账号已停止', limit=300)}")
+            lines.append(
+                f"- {_telegram_text(result.failure_category or 'unknown', limit=100)}："
+                f"{_telegram_text(_result_error(result, '账号已停止'), limit=300)}"
+            )
     return "\n".join(lines)
 
 
@@ -163,7 +169,7 @@ def build_dingtalk_markdown(
     if successes:
         for index, result in enumerate(successes[:MAX_RESULTS_PER_SECTION], 1):
             detail = "验证通过" if dry_run else f"已发送 {result.sent} 条"
-            lines.append(f"{index}. **{_markdown_text(result.target, limit=100)}** - {detail}")
+            lines.append(f"{index}. **{_markdown_text(_result_label(result), limit=100)}** - {detail}")
         if len(successes) > MAX_RESULTS_PER_SECTION:
             lines.append(f"- 其余 {len(successes) - MAX_RESULTS_PER_SECTION} 人已省略")
     else:
@@ -172,27 +178,30 @@ def build_dingtalk_markdown(
     if skipped:
         lines.extend(["", f"#### 跳过目标（{len(skipped)}，没有新发送）"])
         for index, result in enumerate(skipped[:MAX_RESULTS_PER_SECTION], 1):
-            lines.append(f"{index}. **{_markdown_text(result.target, limit=100)}**")
+            lines.append(f"{index}. **{_markdown_text(_result_label(result), limit=100)}**")
         if len(skipped) > MAX_RESULTS_PER_SECTION:
             lines.append(f"- 其余 {len(skipped) - MAX_RESULTS_PER_SECTION} 人已省略")
 
     if unconfirmed:
         lines.extend(["", f"#### 未确认（{len(unconfirmed)}，不会自动重发）"])
         for index, result in enumerate(unconfirmed[:MAX_RESULTS_PER_SECTION], 1):
-            lines.append(f"{index}. **{_markdown_text(result.target, limit=100)}**")
-            lines.append(f"   - 原因：{_markdown_text(result.error or '发送结果未确认', limit=300)}")
+            lines.append(f"{index}. **{_markdown_text(_result_label(result), limit=100)}**")
+            lines.append(f"   - 原因：{_markdown_text(_result_error(result, '发送结果未确认'), limit=300)}")
 
     if account_failures:
         lines.extend(["", f"#### 账号级故障（{len(account_failures)}）"])
         for result in account_failures[:MAX_RESULTS_PER_SECTION]:
-            lines.append(f"- **{_markdown_text(result.failure_category or 'unknown')}**：{_markdown_text(result.error or '账号已停止', limit=300)}")
+            lines.append(
+                f"- **{_markdown_text(result.failure_category or 'unknown')}**："
+                f"{_markdown_text(_result_error(result, '账号已停止'), limit=300)}"
+            )
 
     lines.extend(["", f"#### 失败名单（{len(failures)}）"])
     if failures:
         for index, result in enumerate(failures[:MAX_RESULTS_PER_SECTION], 1):
-            error = _markdown_text(result.error or "未知错误", limit=300)
+            error = _markdown_text(_result_error(result, "未知错误"), limit=300)
             sent = f"，已发送 {result.sent} 条" if result.sent else ""
-            lines.append(f"{index}. **{_markdown_text(result.target, limit=100)}**{sent}")
+            lines.append(f"{index}. **{_markdown_text(_result_label(result), limit=100)}**{sent}")
             lines.append(f"   - 原因：{error}")
         if len(failures) > MAX_RESULTS_PER_SECTION:
             lines.append(f"- 其余 {len(failures) - MAX_RESULTS_PER_SECTION} 人已省略")
@@ -218,6 +227,21 @@ def build_dingtalk_markdown(
 
 def _is_account_failure(result: TargetResult) -> bool:
     return result.failure_category in {"login_required", "risk_control", "rate_limited", "browser_startup"}
+
+
+def _result_label(result: TargetResult) -> str:
+    """Use the configured public alias when one is available."""
+
+    return result.target_alias or result.target
+
+
+def _result_error(result: TargetResult, default: str) -> str:
+    """Redact the result's own real target name from human-facing errors."""
+
+    value = result.error or default
+    if result.target_alias and result.target:
+        value = value.replace(result.target, result.target_alias)
+    return value
 
 
 def _telegram_status(successes, failures, unconfirmed, account_failures, retry_mode: str | None, skipped=None) -> str:
