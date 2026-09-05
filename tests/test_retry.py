@@ -408,6 +408,17 @@ def test_retry_cli_modes_are_mutually_exclusive(monkeypatch) -> None:
         main_module._parse_cli_args()
 
 
+def test_reset_account_state_cli_flag_is_explicit(monkeypatch) -> None:
+    monkeypatch.setattr("sys.argv", ["run.py", "--reset-account-state"])
+
+    args = main_module._parse_cli_args()
+
+    assert args.reset_account_state is True
+    assert args.dry_run is False
+    assert args.retry_failed is False
+    assert args.retry_unconfirmed is False
+
+
 @pytest.mark.asyncio
 async def test_uncertain_send_is_fail_closed_and_not_retryable_failed(monkeypatch, tmp_path) -> None:
     settings = _settings(tmp_path)

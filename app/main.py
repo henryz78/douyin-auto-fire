@@ -14,7 +14,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from app.account_state import AccountCooldownError, AccountLoginRequiredError, AccountState
+from app.account_state import (
+    AccountCooldownError,
+    AccountLoginRequiredError,
+    AccountState,
+    build_credential_fingerprint,
+)
 from app.browser import AuthenticationError, RateLimitedError, RiskControlError, SearchBoxNotReadyError, open_douyin, open_private_messages, save_trace, verify_login
 from app.config import ConfigError, load_settings, load_task
 from app.douyin import DouyinChat
@@ -37,6 +42,7 @@ async def run(
     env_file: str | None = None,
     retry_mode: RetryMode | None = None,
     run_id: str | None = None,
+    reset_account_state: bool = False,
 ) -> int:
     settings = load_settings(env_file)
     task = load_task(settings)
@@ -51,10 +57,17 @@ async def run(
 
     account_id = settings.account_id or "default"
     history = History(settings.artifacts_dir / "history.json")
+    credential_fingerprint = build_credential_fingerprint(settings.storage_state, settings.cookie)
     account_state = AccountState(
         settings.artifacts_dir / "account-state.json",
         account_id,
+        credential_fingerprint=credential_fingerprint,
     )
+    if reset_account_state:
+        if account_state.reset_login_required():
+            LOGGER.warning("已按手动选项重置 login_required 账号状态；history 未修改，将重新验证登录态")
+        else:
+            LOGGER.info("已启用账号状态重置选项，但当前没有 login_required 状态；未绕过风控或限流")
     if not dry_run:
         # Keep history/account-state as an inseparable pair even when the
         # account fails before the first target is reserved. Dry Run is
@@ -339,6 +352,7 @@ def main() -> int:
                     env_file=args.env_file,
                     retry_mode=_retry_mode(args),
                     run_id=run_id,
+                    reset_account_state=getattr(args, "reset_account_state", False),
                 )
             )
     except (
@@ -369,6 +383,11 @@ def _parse_cli_args() -> argparse.Namespace:
         help="人工重试当天未确认消息；可能重复发送，自动流程不得使用",
     )
     parser.add_argument("--env-file", help="指定 .env 文件路径")
+    parser.add_argument(
+        "--reset-account-state",
+        action="store_true",
+        help="人工重置持久化的 login_required 状态；保留 history，不绕过风控或限流",
+    )
     return parser.parse_args()
 
 

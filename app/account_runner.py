@@ -70,6 +70,8 @@ def run_all_accounts() -> int:
                         kwargs["retry_mode"] = "failed"
                     elif getattr(args, "retry_unconfirmed", False):
                         kwargs["retry_mode"] = "unconfirmed"
+                    if getattr(args, "reset_account_state", False):
+                        kwargs["reset_account_state"] = True
                     code = asyncio.run(run(**kwargs))
             status = "success" if code == 0 else "failed"
             summary.append((account.id, status, None))

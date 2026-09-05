@@ -177,6 +177,26 @@ def test_run_all_accounts_forwards_explicit_retry_mode_per_account(
     assert [kwargs["retry_mode"] for _cookie, kwargs in calls] == [expected_mode, expected_mode]
 
 
+def test_run_all_accounts_forwards_manual_account_state_reset(monkeypatch, tmp_path: Path) -> None:
+    env_a = _env_file(tmp_path, ".env.a", "DOUYIN_COOKIE=cookie-a\n")
+    env_b = _env_file(tmp_path, ".env.b", "DOUYIN_COOKIE=cookie-b\n")
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_run(**kwargs) -> int:
+        calls.append((os.environ["DOUYIN_COOKIE"], kwargs))
+        return 0
+
+    args = SimpleNamespace(dry_run=False, env_file=None, reset_account_state=True)
+    monkeypatch.setattr(runner_module, "load_accounts", lambda: [_account("a", env_a), _account("b", env_b)])
+    monkeypatch.setattr(runner_module, "_parse_cli_args", lambda: args)
+    monkeypatch.setattr(runner_module, "run", fake_run)
+    monkeypatch.setattr(runner_module, "load_settings", lambda _env=None: SimpleNamespace(artifacts_dir=tmp_path / "artifacts"))
+    monkeypatch.setattr(runner_module, "_configure_logging", lambda *args, **kwargs: None)
+
+    assert runner_module.run_all_accounts() == 0
+    assert [kwargs["reset_account_state"] for _cookie, kwargs in calls] == [True, True]
+
+
 def test_run_all_accounts_all_failed_returns_one(monkeypatch, tmp_path: Path) -> None:
     env_a = _env_file(tmp_path, ".env.a", "DOUYIN_COOKIE=cookie-a\n")
 

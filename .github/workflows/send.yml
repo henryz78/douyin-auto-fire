@@ -11,6 +11,10 @@ on:
         description: Initialize persistent state when no archive exists (explicit one-time use)
         type: boolean
         default: false
+      reset_account_state:
+        description: Reset persisted login-required state before a manual run (keeps history; does not bypass risk or rate limits)
+        type: boolean
+        default: false
   #使用github actions的日程 可以把下面的这三行代码注释删掉  用外部的不用管 
   # schedule:
   #   - cron: "0 0 * * *"
@@ -56,6 +60,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DRY_RUN: ${{ inputs.dry_run }}
           BOOTSTRAP_STATE: ${{ inputs.bootstrap_state }}
+          RESET_ACCOUNT_STATE: ${{ inputs.reset_account_state }}
           STATE_BRANCH_KEY: ${{ steps.state_key.outputs.branch_key }}
         run: |
           set -euo pipefail
@@ -63,6 +68,10 @@ jobs:
           if [[ "$DRY_RUN" == "true" ]]; then
             if [[ "$BOOTSTRAP_STATE" == "true" ]]; then
               echo "bootstrap_state 不能与 Dry Run 同时使用" >&2
+              exit 1
+            fi
+            if [[ "$RESET_ACCOUNT_STATE" == "true" ]]; then
+              echo "reset_account_state 不能与 Dry Run 同时使用" >&2
               exit 1
             fi
             echo "Dry Run：不恢复或写入跨运行状态"
@@ -265,9 +274,13 @@ jobs:
           retention-days: 7
       - name: Run
         shell: bash
+        env:
+          RESET_ACCOUNT_STATE: ${{ inputs.reset_account_state }}
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" == "true" ]]; then
             python run.py --dry-run
+          elif [[ "$RESET_ACCOUNT_STATE" == "true" ]]; then
+            python run.py --reset-account-state
           else
             python run.py
           fi

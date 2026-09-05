@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.account_state import AccountState, build_credential_fingerprint
 from app.browser import AuthenticationError
 from app.models import Message, Settings, Target, TaskConfig
 import app.main as main_module
@@ -199,6 +200,45 @@ async def test_telegram_notification_receives_account_id(monkeypatch, tmp_path) 
     )
 
     assert send.await_args.kwargs["account_id"] == "account1"
+
+
+@pytest.mark.asyncio
+async def test_manual_reset_option_allows_revalidation_of_login_required_state(monkeypatch, tmp_path) -> None:
+    settings = _settings(tmp_path)
+    task = _task()
+    fingerprint = build_credential_fingerprint(settings.storage_state, settings.cookie)
+    assert fingerprint is not None
+    state = AccountState(
+        settings.artifacts_dir / "account-state.json",
+        "default",
+        credential_fingerprint=fingerprint,
+    )
+    state.mark_failure("login_required")
+
+    page = MagicMock()
+    session = SimpleNamespace(page=page, context=MagicMock())
+
+    @asynccontextmanager
+    async def fake_open_douyin(_settings):
+        yield session
+
+    chat = MagicMock()
+    chat.open_target = AsyncMock()
+    monkeypatch.setattr(main_module, "load_settings", lambda _env=None: settings)
+    monkeypatch.setattr(main_module, "load_task", lambda _settings: task)
+    monkeypatch.setattr(main_module, "open_douyin", fake_open_douyin)
+    monkeypatch.setattr(main_module, "open_private_messages", AsyncMock())
+    monkeypatch.setattr(main_module, "DouyinChat", MagicMock(return_value=chat))
+    monkeypatch.setattr(main_module, "verify_login", AsyncMock())
+    monkeypatch.setattr(main_module, "send_message", AsyncMock())
+    monkeypatch.setattr(main_module, "_write_results", MagicMock())
+    monkeypatch.setattr(main_module, "_notify_dingtalk", AsyncMock())
+    monkeypatch.setattr(main_module, "_notify_telegram", AsyncMock())
+    monkeypatch.setattr(main_module, "_configure_logging", lambda _path, _aliases=None: None)
+
+    assert await main_module.run(reset_account_state=True) == 0
+    assert chat.open_target.await_count == len(task.targets)
+    assert AccountState(settings.artifacts_dir / "account-state.json", "default").data["status"] == "ready"
 
 
 @pytest.mark.asyncio

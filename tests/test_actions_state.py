@@ -539,6 +539,7 @@ def test_send_workflow_restores_and_uploads_only_non_dry_run_state() -> None:
 
     assert "actions: read" in workflow
     assert "bootstrap_state:" in workflow
+    assert "reset_account_state:" in workflow
     assert "Compute state artifact key" in workflow
     assert "sha256" in workflow
     assert "page=${page}" in workflow
@@ -549,6 +550,8 @@ def test_send_workflow_restores_and_uploads_only_non_dry_run_state() -> None:
     assert "sort_by(.created_at)" in workflow
     assert "page=$((page + 1))" in workflow
     assert "bootstrap_state 不能与 Dry Run 同时使用" in workflow
+    assert "reset_account_state 不能与 Dry Run 同时使用" in workflow
+    assert "python run.py --reset-account-state" in workflow
     assert "python -m app.actions_state extract-zip" in workflow
     assert "python -m app.actions_state restore" in workflow
     assert "python -m app.actions_state prepare" in workflow
