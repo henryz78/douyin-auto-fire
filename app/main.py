@@ -19,7 +19,7 @@ from app.errors import classify_error, get_retry_strategy, should_stop_all_tasks
 from app.history import AlreadyRunningError, History, run_lock
 from app.metrics import Metrics, HistoricalMetrics, format_metrics_summary
 from app.models import Settings, TargetResult
-from app.notifier import send_dingtalk_notification, send_webhook_notification
+from app.notifier import send_dingtalk_notification, send_telegram_notification, send_webhook_notification
 from app.privacy import RedactingFormatter, build_target_aliases, redact_text, target_alias
 from app.progress import create_single_run_progress
 from app.sender import send_message
@@ -222,6 +222,7 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
     _write_results(settings.artifacts_dir, task.task_id, dry_run, results, aliases)
     await _notify_dingtalk(settings, task.task_id, dry_run, results, screenshots)
     await _notify_webhook(settings, task.task_id, dry_run, results, screenshots)
+    await _notify_telegram(settings, task.task_id, dry_run, results, screenshots)
     succeeded = sum(result.status == "success" for result in results)
     failed = sum(result.status == "failed" for result in results)
     LOGGER.info("执行结束: 成功 %d，失败 %d", succeeded, failed)
@@ -370,6 +371,31 @@ async def _notify_webhook(
         LOGGER.info("Webhook 通知发送成功")
     except Exception:
         LOGGER.exception("Webhook 通知发送失败，不影响本次任务结果")
+
+
+async def _notify_telegram(
+    settings: Settings,
+    task_id: str,
+    dry_run: bool,
+    results: list[TargetResult],
+    screenshots: list[Path],
+) -> None:
+    if not settings.telegram_bot_token or not settings.telegram_chat_id:
+        return
+    try:
+        await send_telegram_notification(
+            settings.telegram_bot_token,
+            settings.telegram_chat_id,
+            task_id,
+            dry_run,
+            results,
+            screenshots,
+        )
+        LOGGER.info("Telegram 通知发送成功")
+    except Exception:
+        # The bot token is embedded in the Telegram API URL, so never log the
+        # raw exception or traceback here.
+        LOGGER.error("Telegram 通知发送失败，不影响本次任务结果")
 
 
 def _trace_path(artifacts_dir: Path) -> Path:

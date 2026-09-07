@@ -149,3 +149,31 @@ async def test_waits_between_consecutive_messages_for_same_friend(monkeypatch, t
     assert await main_module.run() == 0
     assert send_message.await_count == 2
     assert sleeps == [0.5]
+
+
+@pytest.mark.asyncio
+async def test_telegram_notification_failure_does_not_fail_run(monkeypatch, tmp_path, caplog) -> None:
+    settings = _settings(tmp_path)
+    settings = Settings(
+        **{
+            **settings.__dict__,
+            "telegram_bot_token": "123:SECRET_TOKEN",
+            "telegram_chat_id": "-100",
+        }
+    )
+    monkeypatch.setattr(
+        main_module,
+        "send_telegram_notification",
+        AsyncMock(side_effect=RuntimeError("https://api.telegram.org/bot123:SECRET_TOKEN/sendMessage")),
+    )
+
+    await main_module._notify_telegram(
+        settings,
+        "daily-streak",
+        False,
+        [main_module.TargetResult(target="好友A", status="success", sent=1)],
+        [],
+    )
+
+    assert "Telegram 通知发送失败" in caplog.text
+    assert "SECRET_TOKEN" not in caplog.text

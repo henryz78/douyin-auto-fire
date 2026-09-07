@@ -59,6 +59,8 @@ class Settings:
     webhook_url: str | None = None
     webhook_headers: dict[str, str] | None = None
     webhook_template: str | None = None
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
 
 
 @dataclass(frozen=True)

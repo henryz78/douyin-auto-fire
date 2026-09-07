@@ -27,6 +27,10 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
     webhook_url = _optional_env("WEBHOOK_URL")
     webhook_headers = _parse_webhook_headers(_optional_env("WEBHOOK_HEADERS"))
     webhook_template = _optional_env("WEBHOOK_TEMPLATE")
+    telegram_bot_token = _optional_env("TELEGRAM_BOT_TOKEN")
+    telegram_chat_id = _optional_env("TELEGRAM_CHAT_ID")
+    if bool(telegram_bot_token) != bool(telegram_chat_id):
+        raise ConfigError("TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID 必须同时配置")
 
     return Settings(
         task_config_path=task_path,
@@ -41,6 +45,8 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         webhook_url=webhook_url,
         webhook_headers=webhook_headers,
         webhook_template=webhook_template,
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
     )
 
 
