@@ -24,7 +24,7 @@ from app.browser import (
 )
 from app.config import ConfigError, load_settings, load_task
 from app.douyin import DouyinChat, PageOperationError
-from app.errors import classify_error, get_retry_strategy, should_stop_all_tasks
+from app.errors import ErrorCategory, SafePreSendRetryError, classify_error, should_stop_all_tasks
 from app.history import AlreadyRunningError, History, run_lock
 from app.metrics import Metrics, HistoricalMetrics, format_metrics_summary
 from app.models import Settings, TargetResult
@@ -35,6 +35,7 @@ from app.sender import send_message
 
 
 LOGGER = logging.getLogger("douyin_sender")
+_PRE_SEND_RETRY_DELAYS = (30.0, 120.0, 300.0)
 
 
 async def run(dry_run: bool = False, env_file: str | None = None) -> int:
@@ -60,6 +61,9 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
     results: list[TargetResult] = []
     screenshots: list[Path] = []
     fatal_error: Exception | None = None
+    pre_send_retry_reason: str | None = None
+    pre_send_retry_blocked = False
+    send_started_any = False
 
     try:
         # 阶段1: 打开浏览器
@@ -76,6 +80,10 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
                 multi_stage.finish_stage()
             except Exception as exc:
                 multi_stage.finish_stage()
+                if classify_error(exc) == ErrorCategory.TRANSIENT:
+                    pre_send_retry_reason = "打开私信页面时遇到临时错误"
+                else:
+                    pre_send_retry_blocked = True
                 LOGGER.exception("打开抖音私信页面失败")
                 screenshot = await _screenshot(page, settings.artifacts_dir, "login")
                 if screenshot:
@@ -98,6 +106,7 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
 
                 for index, target in enumerate(task.targets):
                     sent = 0
+                    send_started = False
                     alias = target_alias(index)
                     target_progress.start_target(alias)
                     message_start_time = time.time()
@@ -106,7 +115,11 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
                         LOGGER.info("处理好友: %s", alias)
 
                         # 使用智能重试策略打开目标
-                        await _open_target_with_retry(chat, target.name, task.target_open_retries)
+                        await _open_target_with_retry(
+                            chat,
+                            target.name,
+                            max(task.target_open_retries, len(_PRE_SEND_RETRY_DELAYS)),
+                        )
 
                         if not dry_run:
                             for message_index, message in enumerate(target.messages):
@@ -128,6 +141,8 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
                                 # 发送单条消息并计时
                                 msg_start = time.time()
                                 await verify_login(page, timeout_ms=3_000)
+                                send_started = True
+                                send_started_any = True
                                 await send_message(page, chat, message, task.stickers)
                                 msg_duration = time.time() - msg_start
                                 metrics.record_message_time(msg_duration)
@@ -146,6 +161,7 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
 
                     except (AuthenticationError, RiskControlError) as exc:
                         # 认证失效或风控，立即停止
+                        pre_send_retry_blocked = True
                         LOGGER.exception("处理好友时登录状态失效: %s", alias)
                         screenshot = await _screenshot(page, settings.artifacts_dir, alias)
                         if screenshot:
@@ -166,6 +182,14 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
                     except Exception as exc:
                         # 其他错误，根据错误类型决定是否继续
                         error_category = classify_error(exc)
+                        if send_started:
+                            pre_send_retry_blocked = True
+                            fatal_error = exc
+                        elif error_category == ErrorCategory.TRANSIENT:
+                            pre_send_retry_reason = pre_send_retry_reason or "发送前遇到临时页面或网络错误"
+                            fatal_error = exc
+                        else:
+                            pre_send_retry_blocked = True
                         LOGGER.exception("好友处理失败: %s (错误类型: %s)", alias, error_category.value)
 
                         screenshot = await _screenshot(page, settings.artifacts_dir, alias)
@@ -181,6 +205,9 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
                         results.append(TargetResult(target=target.name, status="failed", sent=sent, error=str(exc), target_alias=alias))
                         metrics.record_target_failure(type(exc).__name__, sent)
                         target_progress.finish_target("failed")
+
+                        if fatal_error is not None:
+                            break
 
                         # 检查是否应该停止所有任务
                         if should_stop_all_tasks(exc):
@@ -203,6 +230,10 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
                     await session.context.tracing.stop()
                 except Exception as exc:
                     LOGGER.exception("停止 trace 失败")
+                    if classify_error(exc) == ErrorCategory.TRANSIENT and not send_started_any:
+                        pre_send_retry_reason = "停止浏览器 trace 时遇到临时错误"
+                    else:
+                        pre_send_retry_blocked = True
                     if fatal_error is None:
                         fatal_error = exc
                         results.append(TargetResult(target="运行收尾", status="failed", error=str(exc)))
@@ -218,6 +249,10 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
                     LOGGER.exception("登录状态保存失败，本次任务结果不受影响")
     except Exception as exc:
         if fatal_error is None:
+            if classify_error(exc) == ErrorCategory.TRANSIENT and not send_started_any:
+                pre_send_retry_reason = "浏览器启动或页面准备时遇到临时错误"
+            else:
+                pre_send_retry_blocked = True
             fatal_error = exc
             results.append(TargetResult(target="运行检查", status="failed", error=str(exc)))
             metrics.record_target_failure(type(exc).__name__)
@@ -245,6 +280,10 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
     failed = sum(result.status == "failed" for result in results)
     LOGGER.info("执行结束: 成功 %d，失败 %d", succeeded, failed)
 
+    if not dry_run and pre_send_retry_reason and not pre_send_retry_blocked and not send_started_any:
+        LOGGER.warning("本次任务尚未开始发送，临时错误可安全重试")
+        fatal_error = SafePreSendRetryError("发送尚未开始，遇到临时错误")
+
     if fatal_error is not None:
         raise fatal_error
     return 1 if failed else 0
@@ -256,6 +295,9 @@ def main() -> int:
         settings = load_settings(args.env_file)
         with run_lock(settings.artifacts_dir / "run.lock"):
             return asyncio.run(run(dry_run=args.dry_run, env_file=args.env_file))
+    except SafePreSendRetryError as exc:
+        print(f"{exc}")
+        return 3
     except (ConfigError, AuthenticationError, RiskControlError, SearchBoxNotReadyError, AlreadyRunningError) as exc:
         print(f"错误: {exc}")
         return 2
@@ -445,8 +487,6 @@ async def _open_target_with_retry(chat: DouyinChat, target_name: str, max_retrie
         except Exception as exc:
             last_exception = exc
 
-            # 获取错误的重试策略
-            strategy = get_retry_strategy(exc)
             category = classify_error(exc)
 
             if attempt >= max_retries:
@@ -458,16 +498,15 @@ async def _open_target_with_retry(chat: DouyinChat, target_name: str, max_retrie
                 )
                 break
 
-            if not strategy.should_retry(attempt):
-                # 策略判断不应重试（如永久性错误）
+            if category != ErrorCategory.TRANSIENT:
+                # 登录失效、风控、配置和目标不存在都不靠重试解决
                 LOGGER.warning(
                     "打开目标失败，错误类型 %s 不建议重试",
                     category.value,
                 )
                 break
 
-            # 计算重试延迟
-            delay = strategy.get_delay(attempt)
+            delay = _PRE_SEND_RETRY_DELAYS[min(attempt, len(_PRE_SEND_RETRY_DELAYS) - 1)]
             LOGGER.info(
                 "打开目标失败 (尝试 %d/%d)，%s 秒后重试 (错误类型: %s)",
                 attempt + 1,

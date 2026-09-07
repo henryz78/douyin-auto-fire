@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.browser import AuthenticationError
+from app.errors import SafePreSendRetryError
 from app.models import Message, Settings, Target, TaskConfig
 import app.main as main_module
 
@@ -94,11 +95,29 @@ async def test_browser_start_failure_still_notifies(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(main_module, "_notify_dingtalk", notify)
     monkeypatch.setattr(main_module, "_configure_logging", lambda _path, _aliases=None: None)
 
-    with pytest.raises(RuntimeError, match="浏览器启动失败"):
+    with pytest.raises(SafePreSendRetryError, match="发送尚未开始"):
         await main_module.run()
 
     results = notify.await_args.args[3]
     assert [(result.target, result.status) for result in results] == [("运行检查", "failed")]
+
+
+@pytest.mark.asyncio
+async def test_target_open_retries_transient_error_with_safe_delays(monkeypatch) -> None:
+    chat = SimpleNamespace(
+        open_target=AsyncMock(side_effect=[RuntimeError("network timeout"), None])
+    )
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(main_module.asyncio, "sleep", fake_sleep)
+
+    await main_module._open_target_with_retry(chat, "好友A", 3)
+
+    assert chat.open_target.await_count == 2
+    assert sleeps == [30.0]
 
 
 @pytest.mark.asyncio

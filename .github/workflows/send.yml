@@ -23,7 +23,7 @@ concurrency:
 jobs:
   send:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
       actions: read
@@ -182,9 +182,25 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" == "true" ]]; then
             python run.py --dry-run
-          else
-            python run.py
+            exit $?
           fi
+
+          delays=(30 120 300)
+          for attempt in 1 2 3 4; do
+            set +e
+            python run.py
+            status=$?
+            set -e
+            if [[ "$status" -eq 0 ]]; then
+              exit 0
+            fi
+            if [[ "$status" -ne 3 || "$attempt" -ge 4 ]]; then
+              exit "$status"
+            fi
+            delay="${delays[$((attempt - 1))]}"
+            echo "发送尚未开始，第 ${attempt}/4 次运行失败，${delay} 秒后重启浏览器流程"
+            sleep "$delay"
+          done
       - name: Encrypt storage state
         id: encrypt_storage_state
         if: ${{ always() && inputs.dry_run != true }}

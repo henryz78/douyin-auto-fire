@@ -23,3 +23,11 @@ def test_workflow_has_explicit_storage_state_reset() -> None:
     assert "reset_storage_state:" in workflow
     assert "RESET_STORAGE_STATE" in workflow
     assert "已请求忽略上一份 Storage State" in workflow
+
+
+def test_workflow_retries_only_safe_pre_send_failures() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "delays=(30 120 300)" in workflow
+    assert "for attempt in 1 2 3 4" in workflow
+    assert 'status -ne 3' in workflow

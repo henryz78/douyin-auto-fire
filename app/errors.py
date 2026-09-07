@@ -13,6 +13,10 @@ class ErrorCategory(Enum):
     RATE_LIMIT = "rate_limit"        # 风控/限流，需要更长延迟或停止
 
 
+class SafePreSendRetryError(RuntimeError):
+    """The run failed before any message was attempted and may be retried."""
+
+
 class RetryStrategy:
     """重试策略配置。"""
 
@@ -77,6 +81,12 @@ def classify_error(exc: Exception) -> ErrorCategory:
         "not found", "does not exist"
     ]):
         return ErrorCategory.PERMANENT
+
+    if any(keyword in error_msg for keyword in [
+        "登录失效", "登录状态", "未登录", "login required",
+        "not logged in", "authentication", "unauthorized", "401"
+    ]):
+        return ErrorCategory.AUTHENTICATION
 
     # 页面元素定位问题 - 可能是DOM变化或渲染慢
     if isinstance(exc, PageOperationError) or any(keyword in error_msg for keyword in [

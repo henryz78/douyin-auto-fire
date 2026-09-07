@@ -7,6 +7,7 @@ import pytest
 import app.account_runner as runner_module
 from app.accounts import Account
 from app.config import ConfigError
+from app.errors import SafePreSendRetryError
 
 
 def _env_file(tmp_path: Path, name: str, content: str) -> Path:
@@ -154,6 +155,21 @@ def test_run_all_accounts_all_failed_returns_one(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr(runner_module, "_configure_logging", lambda *args, **kwargs: None)
 
     assert runner_module.run_all_accounts() == 1
+
+
+def test_run_all_accounts_all_safe_pre_send_failures_return_three(monkeypatch, tmp_path: Path) -> None:
+    env_a = _env_file(tmp_path, ".env.a", "DOUYIN_COOKIE=cookie-a\n")
+
+    async def fake_run(dry_run: bool = False, env_file: str | None = None) -> int:
+        raise SafePreSendRetryError("发送尚未开始，遇到临时错误")
+
+    monkeypatch.setattr(runner_module, "load_accounts", lambda: [_account("a", env_a)])
+    monkeypatch.setattr(runner_module, "_parse_cli_args", lambda: SimpleNamespace(dry_run=False, env_file=None))
+    monkeypatch.setattr(runner_module, "run", fake_run)
+    monkeypatch.setattr(runner_module, "load_settings", lambda _env=None: SimpleNamespace(artifacts_dir=tmp_path / "artifacts"))
+    monkeypatch.setattr(runner_module, "_configure_logging", lambda *args, **kwargs: None)
+
+    assert runner_module.run_all_accounts() == 3
 
 
 def test_run_all_accounts_no_enabled_accounts_skips(monkeypatch) -> None:

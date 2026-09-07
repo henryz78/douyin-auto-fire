@@ -23,6 +23,9 @@ class TestErrorClassification:
         exc = AuthenticationError("登录状态失效")
         assert classify_error(exc) == ErrorCategory.AUTHENTICATION
 
+    def test_authentication_message_is_not_retried(self):
+        assert classify_error(Exception("login required")) == ErrorCategory.AUTHENTICATION
+
     def test_risk_control_error(self):
         """风控错误应该归类为 RATE_LIMIT。"""
         exc = RiskControlError("安全验证")

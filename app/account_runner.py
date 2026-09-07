@@ -11,6 +11,7 @@ from dotenv import dotenv_values, load_dotenv
 
 from app.accounts import load_accounts
 from app.config import ConfigError, load_settings
+from app.errors import SafePreSendRetryError
 from app.history import run_lock
 from app.main import LOGGER, _configure_logging, _parse_cli_args, run
 
@@ -47,6 +48,7 @@ def run_all_accounts() -> int:
     LOGGER.info("多账号模式：共 %d 个启用账号", len(accounts))
 
     summary: list[tuple[str, str, str | None]] = []
+    safe_pre_send_failures = 0
     for account in accounts:
         # 先按默认产物目录配置账号日志，保证账号内任何失败都带 [账号id] 前缀；
         # 若账号 env 显式指定了 ARTIFACTS_DIR，进入账号环境后会重定向。
@@ -61,6 +63,10 @@ def run_all_accounts() -> int:
             status = "success" if code == 0 else "failed"
             summary.append((account.id, status, None))
             LOGGER.info("执行完成: %s", status)
+        except SafePreSendRetryError as exc:
+            safe_pre_send_failures += 1
+            summary.append((account.id, "failed", type(exc).__name__))
+            LOGGER.warning("账号 %s 发送前遇到临时错误，可安全重试", account.id)
         except Exception as exc:
             # 异常消息可能包含好友真名（如 Playwright 定位器超时），此处只记录
             # 异常类型；完整脱敏详情已由 run() 写入该账号的 run.log。
@@ -73,6 +79,8 @@ def run_all_accounts() -> int:
         LOGGER.info("[%s] 结果: %s%s", account_id, status, detail)
     failed = sum(1 for _, status, _ in summary if status == "failed")
     LOGGER.info("多账号执行结束: 成功 %d，失败 %d", len(summary) - failed, failed)
+    if safe_pre_send_failures == len(summary):
+        return 3
     return 1 if failed else 0
 
 
