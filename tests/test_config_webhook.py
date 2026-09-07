@@ -80,3 +80,54 @@ def test_load_settings_webhook_optional(tmp_path):
         assert settings.webhook_url is None
         assert settings.webhook_headers is None
         assert settings.webhook_template is None
+
+
+def test_load_settings_with_fixed_proxy(tmp_path):
+    config_file = tmp_path / "config.json"
+    config_file.write_text('{"friends": [], "messages": []}')
+
+    with patch.dict(
+        os.environ,
+        {
+            "TASK_CONFIG": str(config_file),
+            "DOUYIN_PROXY_SERVER": "http://proxy.example.com:8080",
+            "DOUYIN_PROXY_USERNAME": "proxy-user",
+            "DOUYIN_PROXY_PASSWORD": "proxy-password",
+        },
+        clear=True,
+    ):
+        settings = load_settings()
+
+    assert settings.proxy_server == "http://proxy.example.com:8080"
+    assert settings.proxy_username == "proxy-user"
+    assert settings.proxy_password == "proxy-password"
+
+
+def test_proxy_credentials_require_server(tmp_path):
+    config_file = tmp_path / "config.json"
+    config_file.write_text('{"friends": [], "messages": []}')
+
+    with patch.dict(
+        os.environ,
+        {"TASK_CONFIG": str(config_file), "DOUYIN_PROXY_USERNAME": "proxy-user"},
+        clear=True,
+    ):
+        with pytest.raises(ConfigError, match="DOUYIN_PROXY_SERVER"):
+            load_settings()
+
+
+def test_proxy_credentials_must_be_paired(tmp_path):
+    config_file = tmp_path / "config.json"
+    config_file.write_text('{"friends": [], "messages": []}')
+
+    with patch.dict(
+        os.environ,
+        {
+            "TASK_CONFIG": str(config_file),
+            "DOUYIN_PROXY_SERVER": "http://proxy.example.com:8080",
+            "DOUYIN_PROXY_PASSWORD": "proxy-password",
+        },
+        clear=True,
+    ):
+        with pytest.raises(ConfigError, match="USERNAME 和 DOUYIN_PROXY_PASSWORD"):
+            load_settings()

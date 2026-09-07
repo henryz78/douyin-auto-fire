@@ -61,6 +61,9 @@ class Settings:
     webhook_template: str | None = None
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
+    proxy_server: str | None = None
+    proxy_username: str | None = None
+    proxy_password: str | None = None
 
 
 @dataclass(frozen=True)

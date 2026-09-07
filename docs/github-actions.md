@@ -179,6 +179,20 @@ DOUYIN_CONFIG
 
 Secret 粘贴刚刚生成的完整配置 JSON，然后保存。
 
+### 5.3 （可选）配置固定代理
+
+如果 GitHub Actions 的出口网络经常变化，建议使用同一个固定或粘性代理。提取 Cookie 时也应使用同一个代理，避免登录环境频繁变化。
+
+添加以下 Secrets：
+
+| Secret | 内容 | 必须 |
+| --- | --- | --- |
+| `DOUYIN_PROXY_SERVER` | 代理地址，例如 `http://proxy.example.com:8080` | 可选 |
+| `DOUYIN_PROXY_USERNAME` | 代理账号 | 代理需要认证时必填 |
+| `DOUYIN_PROXY_PASSWORD` | 代理密码 | 代理需要认证时必填 |
+
+代理账号和密码必须同时配置。不要把代理密码写进仓库文件、配置 JSON 或日志中；不要使用每次运行都随机更换出口 IP 的代理池。
+
 配置完成后至少应该存在：
 
 ```text

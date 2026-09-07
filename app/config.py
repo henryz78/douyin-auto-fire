@@ -32,6 +32,14 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
     if bool(telegram_bot_token) != bool(telegram_chat_id):
         raise ConfigError("TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID 必须同时配置")
 
+    proxy_server = _optional_env("DOUYIN_PROXY_SERVER")
+    proxy_username = _optional_env("DOUYIN_PROXY_USERNAME")
+    proxy_password = _optional_env("DOUYIN_PROXY_PASSWORD")
+    if (proxy_username or proxy_password) and not proxy_server:
+        raise ConfigError("DOUYIN_PROXY_SERVER 必须与代理账号密码一起配置")
+    if bool(proxy_username) != bool(proxy_password):
+        raise ConfigError("DOUYIN_PROXY_USERNAME 和 DOUYIN_PROXY_PASSWORD 必须同时配置")
+
     return Settings(
         task_config_path=task_path,
         storage_state=_optional_env("DOUYIN_STORAGE_STATE") or (str(default_state) if default_state.is_file() else None),
@@ -47,6 +55,9 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         webhook_template=webhook_template,
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
+        proxy_server=proxy_server,
+        proxy_username=proxy_username,
+        proxy_password=proxy_password,
     )
 
 

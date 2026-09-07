@@ -1,4 +1,6 @@
 import logging
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,10 +12,55 @@ from app.browser import (
     _collect_safe_diagnostic,
     _normalize_cookies,
     _safe_url,
+    open_douyin,
     open_private_messages,
 )
 from app.config import ConfigError
+from app.models import Settings
 from app.selectors import DOUYIN_CHAT_URL, LOGIN_REQUIRED_MARKERS, RISK_MARKERS
+
+
+@pytest.mark.asyncio
+async def test_open_douyin_uses_fixed_proxy_without_exposing_credentials() -> None:
+    page = MagicMock()
+    context = MagicMock()
+    context.new_page = AsyncMock(return_value=page)
+    context.close = AsyncMock()
+    browser = MagicMock()
+    browser.new_context = AsyncMock(return_value=context)
+    browser.close = AsyncMock()
+    playwright = SimpleNamespace(chromium=SimpleNamespace(launch=AsyncMock(return_value=browser)), stop=AsyncMock())
+    start = AsyncMock(return_value=playwright)
+    settings = Settings(
+        task_config_path=Path("config.json"),
+        storage_state='{"cookies": [], "origins": []}',
+        cookie=None,
+        headless=True,
+        browser_path=None,
+        artifacts_dir=Path("artifacts"),
+        trace=False,
+        proxy_server="http://proxy.example.com:8080",
+        proxy_username="proxy-user",
+        proxy_password="proxy-password",
+    )
+
+    with patch("app.browser.async_playwright", return_value=SimpleNamespace(start=start)):
+        async with open_douyin(settings) as session:
+            assert session.page is page
+
+    playwright.chromium.launch.assert_awaited_once_with(
+        headless=True,
+        proxy={
+            "server": "http://proxy.example.com:8080",
+            "username": "proxy-user",
+            "password": "proxy-password",
+        },
+    )
+    browser.new_context.assert_awaited_once_with(
+        viewport={"width": 1440, "height": 1000},
+        locale="zh-CN",
+        storage_state={"cookies": [], "origins": []},
+    )
 
 
 @pytest.mark.asyncio

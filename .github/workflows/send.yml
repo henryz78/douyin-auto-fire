@@ -32,6 +32,9 @@ jobs:
       WEBHOOK_TEMPLATE: ${{ secrets.WEBHOOK_TEMPLATE }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      DOUYIN_PROXY_SERVER: ${{ secrets.DOUYIN_PROXY_SERVER }}
+      DOUYIN_PROXY_USERNAME: ${{ secrets.DOUYIN_PROXY_USERNAME }}
+      DOUYIN_PROXY_PASSWORD: ${{ secrets.DOUYIN_PROXY_PASSWORD }}
       HEADLESS: "true"
     steps:
       - uses: actions/checkout@v4
