@@ -30,4 +30,4 @@ def test_workflow_retries_only_safe_pre_send_failures() -> None:
 
     assert "delays=(30 120 300)" in workflow
     assert "for attempt in 1 2 3 4" in workflow
-    assert 'status -ne 3' in workflow
+    assert '"$status" -ne 3' in workflow
