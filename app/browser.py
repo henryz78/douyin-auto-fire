@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -175,6 +177,27 @@ async def open_private_messages(page: Page, timeout_ms: int = 15_000) -> None:
 async def save_trace(session: BrowserSession, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     await session.context.tracing.stop(path=path)
+
+
+async def save_storage_state(session: BrowserSession, path: str | Path) -> None:
+    """Persist the current login state without exposing it in logs."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    state = await session.context.storage_state()
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        data = json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8")
+        with temporary.open("wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    except Exception:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 async def _any_visible(page: Page, selectors: tuple[str, ...], timeout_ms: int) -> bool:

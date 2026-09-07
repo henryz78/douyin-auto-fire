@@ -64,6 +64,7 @@ class Settings:
     proxy_server: str | None = None
     proxy_username: str | None = None
     proxy_password: str | None = None
+    storage_state_output: str | None = None
 
 
 @dataclass(frozen=True)

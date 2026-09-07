@@ -39,6 +39,7 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         raise ConfigError("DOUYIN_PROXY_SERVER 必须与代理账号密码一起配置")
     if bool(proxy_username) != bool(proxy_password):
         raise ConfigError("DOUYIN_PROXY_USERNAME 和 DOUYIN_PROXY_PASSWORD 必须同时配置")
+    storage_state_output = _optional_env("DOUYIN_STORAGE_STATE_OUTPUT")
 
     return Settings(
         task_config_path=task_path,
@@ -58,6 +59,7 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
         proxy_server=proxy_server,
         proxy_username=proxy_username,
         proxy_password=proxy_password,
+        storage_state_output=storage_state_output,
     )
 
 

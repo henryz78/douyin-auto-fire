@@ -17,7 +17,13 @@ from app.main import LOGGER, _configure_logging, _parse_cli_args, run
 
 # 单账号模式的旧环境变量。多账号模式下由各账号的 env 文件提供，
 # 启动时先清掉进程环境中的旧值，避免残留值被所有账号继承。
-_LEGACY_ENV_KEYS = ("DOUYIN_COOKIE", "DOUYIN_STORAGE_STATE", "TASK_CONFIG", "ARTIFACTS_DIR")
+_LEGACY_ENV_KEYS = (
+    "DOUYIN_COOKIE",
+    "DOUYIN_STORAGE_STATE",
+    "DOUYIN_STORAGE_STATE_OUTPUT",
+    "TASK_CONFIG",
+    "ARTIFACTS_DIR",
+)
 
 
 def run_all_accounts() -> int:

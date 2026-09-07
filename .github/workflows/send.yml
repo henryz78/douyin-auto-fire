@@ -7,6 +7,10 @@ on:
         description: Only verify login and friends without sending
         type: boolean
         default: false
+      reset_storage_state:
+        description: Ignore the previous saved login state and use the current Cookie once
+        type: boolean
+        default: false
   # 使用 GitHub Actions 的日程时把下面三行注释删掉；用外部 cron 不用管
   # schedule:
   #   - cron: "0 0 * * *"
@@ -22,6 +26,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      actions: read
     env:
       DOUYIN_COOKIE: ${{ secrets.DOUYIN_COOKIE }}
       DOUYIN_CONFIG: ${{ secrets.DOUYIN_CONFIG }}
@@ -35,6 +40,7 @@ jobs:
       DOUYIN_PROXY_SERVER: ${{ secrets.DOUYIN_PROXY_SERVER }}
       DOUYIN_PROXY_USERNAME: ${{ secrets.DOUYIN_PROXY_USERNAME }}
       DOUYIN_PROXY_PASSWORD: ${{ secrets.DOUYIN_PROXY_PASSWORD }}
+      DOUYIN_STORAGE_STATE_OUTPUT: storage-state.next.json
       HEADLESS: "true"
     steps:
       - uses: actions/checkout@v4
@@ -114,6 +120,63 @@ jobs:
               encoding="utf-8",
           )
           PY
+      - name: Restore encrypted storage state
+        id: restore_storage_state
+        if: ${{ inputs.dry_run != true }}
+        uses: actions/cache/restore@v4
+        with:
+          path: storage-state.enc
+          key: douyin-storage-state-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            douyin-storage-state-${{ github.ref_name }}-
+      - name: Prepare storage state for this run
+        if: ${{ inputs.dry_run != true }}
+        shell: bash
+        env:
+          DOUYIN_STORAGE_STATE_KEY: ${{ secrets.DOUYIN_STORAGE_STATE_KEY }}
+          RESET_STORAGE_STATE: ${{ inputs.reset_storage_state }}
+        run: |
+          set -euo pipefail
+          if [[ -f config/accounts.json ]]; then
+            echo "多账号模式暂不启用跨运行 Storage State，继续使用各账号 Cookie"
+            echo "DOUYIN_STORAGE_STATE_OUTPUT=" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [[ "$RESET_STORAGE_STATE" == "true" ]]; then
+            echo "已请求忽略上一份 Storage State，本次使用当前 Cookie"
+            exit 0
+          fi
+          if [[ ! -s storage-state.enc ]]; then
+            echo "没有找到历史 Storage State，本次使用当前 Cookie"
+            exit 0
+          fi
+          if [[ -z "${DOUYIN_STORAGE_STATE_KEY:-}" ]]; then
+            echo "发现历史 Storage State，但未配置 DOUYIN_STORAGE_STATE_KEY；为避免回退到可能重复发送的 Cookie，任务停止" >&2
+            exit 1
+          fi
+          key_file="$RUNNER_TEMP/douyin-storage-state-key"
+          umask 077
+          printf '%s' "$DOUYIN_STORAGE_STATE_KEY" > "$key_file"
+          if ! gpg --batch --quiet --yes --pinentry-mode loopback \
+            --passphrase-file "$key_file" --decrypt storage-state.enc > storage-state.json.tmp; then
+            echo "Storage State 解密失败，任务停止" >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("storage-state.json.tmp")
+          try:
+              value = json.loads(path.read_text(encoding="utf-8"))
+          except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+              raise SystemExit(f"Storage State 不是有效 JSON: {exc}") from exc
+          if not isinstance(value, dict) or not isinstance(value.get("cookies"), list):
+              raise SystemExit("Storage State 格式无效")
+          PY
+          mv storage-state.json.tmp storage-state.json
+          echo "DOUYIN_STORAGE_STATE=storage-state.json" >> "$GITHUB_ENV"
+          echo "已恢复上一轮登录状态"
       - name: Run
         shell: bash
         run: |
@@ -122,6 +185,40 @@ jobs:
           else
             python run.py
           fi
+      - name: Encrypt storage state
+        id: encrypt_storage_state
+        if: ${{ always() && inputs.dry_run != true }}
+        shell: bash
+        env:
+          DOUYIN_STORAGE_STATE_KEY: ${{ secrets.DOUYIN_STORAGE_STATE_KEY }}
+        run: |
+          set -euo pipefail
+          echo "has_state=false" >> "$GITHUB_OUTPUT"
+          if [[ ! -s storage-state.next.json ]]; then
+            echo "本次没有生成新的 Storage State，保留上一份状态"
+            exit 0
+          fi
+          if [[ -z "${DOUYIN_STORAGE_STATE_KEY:-}" ]]; then
+            echo "未配置 DOUYIN_STORAGE_STATE_KEY，跳过跨运行状态保存；本次任务结果不受影响" >&2
+            exit 0
+          fi
+          key_file="$RUNNER_TEMP/douyin-storage-state-key"
+          umask 077
+          printf '%s' "$DOUYIN_STORAGE_STATE_KEY" > "$key_file"
+          if ! gpg --batch --quiet --yes --pinentry-mode loopback \
+            --passphrase-file "$key_file" --symmetric --cipher-algo AES256 \
+            --output storage-state.enc storage-state.next.json; then
+            echo "Storage State 加密失败，跳过保存；本次任务结果不受影响" >&2
+            exit 0
+          fi
+          echo "has_state=true" >> "$GITHUB_OUTPUT"
+      - name: Save encrypted storage state
+        if: ${{ always() && inputs.dry_run != true && steps.encrypt_storage_state.outputs.has_state == 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: storage-state.enc
+          key: douyin-storage-state-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@v4

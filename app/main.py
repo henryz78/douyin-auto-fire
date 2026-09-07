@@ -12,7 +12,16 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from app.browser import AuthenticationError, RiskControlError, SearchBoxNotReadyError, open_douyin, open_private_messages, save_trace, verify_login
+from app.browser import (
+    AuthenticationError,
+    RiskControlError,
+    SearchBoxNotReadyError,
+    open_douyin,
+    open_private_messages,
+    save_storage_state,
+    save_trace,
+    verify_login,
+)
 from app.config import ConfigError, load_settings, load_task
 from app.douyin import DouyinChat, PageOperationError
 from app.errors import classify_error, get_retry_strategy, should_stop_all_tasks
@@ -198,6 +207,15 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
                         fatal_error = exc
                         results.append(TargetResult(target="运行收尾", status="failed", error=str(exc)))
                         metrics.record_target_failure(type(exc).__name__)
+
+            if fatal_error is None and not dry_run and settings.storage_state_output:
+                try:
+                    await save_storage_state(session, settings.storage_state_output)
+                    LOGGER.info("登录状态已保存")
+                except Exception:
+                    # State persistence must never turn an already completed send
+                    # into a rerunnable failed job.
+                    LOGGER.exception("登录状态保存失败，本次任务结果不受影响")
     except Exception as exc:
         if fatal_error is None:
             fatal_error = exc

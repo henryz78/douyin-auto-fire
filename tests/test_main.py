@@ -103,7 +103,12 @@ async def test_browser_start_failure_still_notifies(monkeypatch, tmp_path) -> No
 
 @pytest.mark.asyncio
 async def test_waits_between_consecutive_messages_for_same_friend(monkeypatch, tmp_path) -> None:
-    settings = _settings(tmp_path)
+    settings = Settings(
+        **{
+            **_settings(tmp_path).__dict__,
+            "storage_state_output": str(tmp_path / "storage-state.next.json"),
+        }
+    )
     messages = (Message(type="text", content="一"), Message(type="text", content="二"))
     task = TaskConfig(
         task_id="daily-streak",
@@ -145,10 +150,13 @@ async def test_waits_between_consecutive_messages_for_same_friend(monkeypatch, t
     monkeypatch.setattr(main_module, "_write_results", MagicMock())
     monkeypatch.setattr(main_module, "_notify_dingtalk", AsyncMock())
     monkeypatch.setattr(main_module, "_configure_logging", lambda _path, _aliases=None: None)
+    save_state = AsyncMock()
+    monkeypatch.setattr(main_module, "save_storage_state", save_state)
 
     assert await main_module.run() == 0
     assert send_message.await_count == 2
     assert sleeps == [0.5]
+    save_state.assert_awaited_once_with(session, str(tmp_path / "storage-state.next.json"))
 
 
 @pytest.mark.asyncio

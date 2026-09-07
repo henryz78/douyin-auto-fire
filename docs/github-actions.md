@@ -193,6 +193,26 @@ Secret 粘贴刚刚生成的完整配置 JSON，然后保存。
 
 代理账号和密码必须同时配置。不要把代理密码写进仓库文件、配置 JSON 或日志中；不要使用每次运行都随机更换出口 IP 的代理池。
 
+### 5.4 （可选）保存跨运行登录状态
+
+如果希望下一次 Action 继续使用本次成功运行后的登录状态，再添加一个高强度的 Secret：
+
+```text
+DOUYIN_STORAGE_STATE_KEY
+```
+
+可以在本地生成随机密钥：
+
+```bash
+openssl rand -hex 32
+```
+
+状态文件会使用这个密钥加密后保存到 GitHub Actions Cache，仓库中不会保存明文登录状态。第一次没有历史状态时仍会使用 `DOUYIN_COOKIE`；之后会优先使用已恢复的状态。
+
+手动运行时如果刚更新了 Cookie，可以把 `reset_storage_state` 设置为 `true`，本次忽略旧状态并使用新 Cookie。Dry Run 不会恢复或写入跨运行状态。
+
+当前跨运行 Storage State 只对单账号模式启用；多账号模式继续使用各账号自己的 Cookie，避免账号登录状态混用。
+
 配置完成后至少应该存在：
 
 ```text

@@ -103,6 +103,23 @@ def test_load_settings_with_fixed_proxy(tmp_path):
     assert settings.proxy_password == "proxy-password"
 
 
+def test_load_settings_with_storage_state_output(tmp_path):
+    config_file = tmp_path / "config.json"
+    config_file.write_text('{"friends": [], "messages": []}')
+
+    with patch.dict(
+        os.environ,
+        {
+            "TASK_CONFIG": str(config_file),
+            "DOUYIN_STORAGE_STATE_OUTPUT": str(tmp_path / "storage-state.next.json"),
+        },
+        clear=True,
+    ):
+        settings = load_settings()
+
+    assert settings.storage_state_output == str(tmp_path / "storage-state.next.json")
+
+
 def test_proxy_credentials_require_server(tmp_path):
     config_file = tmp_path / "config.json"
     config_file.write_text('{"friends": [], "messages": []}')

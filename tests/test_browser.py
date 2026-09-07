@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from app.browser import (
     _safe_url,
     open_douyin,
     open_private_messages,
+    save_storage_state,
 )
 from app.config import ConfigError
 from app.models import Settings
@@ -61,6 +63,22 @@ async def test_open_douyin_uses_fixed_proxy_without_exposing_credentials() -> No
         locale="zh-CN",
         storage_state={"cookies": [], "origins": []},
     )
+
+
+@pytest.mark.asyncio
+async def test_save_storage_state_writes_json_atomically(tmp_path) -> None:
+    context = MagicMock()
+    context.storage_state = AsyncMock(return_value={"cookies": [{"name": "sid"}], "origins": []})
+    session = SimpleNamespace(context=context)
+    output = tmp_path / "storage-state.next.json"
+
+    await save_storage_state(session, output)
+
+    assert json.loads(output.read_text(encoding="utf-8")) == {
+        "cookies": [{"name": "sid"}],
+        "origins": [],
+    }
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 @pytest.mark.asyncio
