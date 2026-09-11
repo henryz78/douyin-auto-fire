@@ -90,6 +90,12 @@ SEND_PENDING_MARKERS = (
     '[class*="im-saas-message-spin"]',
     '[data-icon="spin"]',
 )
+SEND_RETRY_MARKERS = (
+    '[aria-label*="重试"]',
+    '[title*="重试"]',
+    '[class*="ContentSideSendStatusretry"]',
+    '[class*="SendStatusretry"]',
+)
 
 # Overall budget for confirming a single message reaches a terminal state. A
 # stuck spinner past this is treated as failure/uncertain, never success.
@@ -272,7 +278,10 @@ async def _click_and_confirm_sticker(page: Page, item, before: tuple[str, str], 
     await item.click(force=True)
     try:
         await _confirm_sticker_sent(page, before, name, resource_key)
-    except PageOperationError:
+    except PageOperationError as exc:
+        if "页面提示可以重试" in str(exc) and await _click_retry_on_latest_failed_message(page):
+            await _confirm_sticker_sent(page, before, name, resource_key)
+            return
         if await _publish_ready(page):
             await _trigger_send(page)
             await _confirm_sticker_sent(page, before, name, resource_key)
@@ -298,6 +307,19 @@ async def _confirm_sticker_sent(
     resource_key: str = "",
 ) -> None:
     await _confirm_outgoing_message(page, before, f"原生表情“{name}”", resource_key=resource_key)
+
+
+async def _click_retry_on_latest_failed_message(page: Page) -> bool:
+    latest = page.locator(LATEST_OUTGOING_MESSAGE).first
+    for selector in SEND_RETRY_MARKERS:
+        marker = latest.locator(selector).first
+        try:
+            if await marker.count() and await marker.is_visible():
+                await marker.click(force=True)
+                return True
+        except Exception:
+            continue
+    return False
 
 
 async def _marker_visible(scope: Locator, selectors: tuple[str, ...]) -> bool:

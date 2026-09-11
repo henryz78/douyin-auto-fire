@@ -11,6 +11,7 @@ from app.sender import (
     SEND_BUTTONS,
     SEND_FAILURE_MARKERS,
     SEND_PENDING_MARKERS,
+    SEND_RETRY_MARKERS,
     _await_send_terminal_state,
     _click_and_confirm_sticker,
     _confirm_outgoing_message,
@@ -305,6 +306,56 @@ async def test_sticker_click_retries_via_publish_when_staged(monkeypatch) -> Non
 
     assert calls["confirm"] == 2
     assert calls["publish"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sticker_click_retries_via_retry_marker_when_failed(monkeypatch) -> None:
+    item = MagicMock()
+    item.get_attribute = AsyncMock(return_value=None)
+    item.click = AsyncMock()
+    img_first = MagicMock()
+    img_first.count = AsyncMock(return_value=0)
+    img_loc = MagicMock()
+    img_loc.first = img_first
+    item.locator.return_value = img_loc
+
+    marker = MagicMock()
+    marker.count = AsyncMock(return_value=1)
+    marker.is_visible = AsyncMock(return_value=True)
+    marker.click = AsyncMock()
+    marker_group = MagicMock()
+    marker_group.first = marker
+
+    latest = MagicMock()
+    latest.locator.side_effect = lambda selector: marker_group if selector in SEND_RETRY_MARKERS else MagicMock(first=MagicMock())
+    latest_group = MagicMock()
+    latest_group.first = latest
+    page = MagicMock()
+    page.locator.side_effect = lambda selector: latest_group if selector == LATEST_OUTGOING_MESSAGE else MagicMock()
+
+    calls = {"confirm": 0, "publish": 0}
+
+    async def fake_confirm(_page, _before, _name, _key=""):
+        calls["confirm"] += 1
+        if calls["confirm"] == 1:
+            raise PageOperationError("发送失败，页面提示可以重试")
+        return None
+
+    async def fake_trigger(_page):
+        calls["publish"] += 1
+
+    async def fake_ready(_page):
+        return False
+
+    monkeypatch.setattr("app.sender._confirm_sticker_sent", fake_confirm)
+    monkeypatch.setattr("app.sender._trigger_send", fake_trigger)
+    monkeypatch.setattr("app.sender._publish_ready", fake_ready)
+
+    await _click_and_confirm_sticker(page, item, ("anchor", "old"), "比心")
+
+    assert calls["confirm"] == 2
+    assert calls["publish"] == 0
+    marker.click.assert_awaited_once_with(force=True)
 
 
 @pytest.mark.asyncio
